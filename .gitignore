@@ -1,0 +1,8 @@
+/rootcanal
+/rootcanal.exe
+/dist/
+/coverage.out
+/coverage.xml
+*.test
+.task/
+.claude/

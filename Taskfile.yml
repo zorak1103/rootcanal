@@ -1,0 +1,64 @@
+version: '3'
+
+vars:
+  MODULE: gitlab.com/zorak1103/rootcanal
+  MIN_COVERAGE: "85.0"
+  VERSION:
+    sh: git describe --tags --always 2>/dev/null || echo dev
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the rootcanal binary (output named per platform)
+    cmds:
+      - >-
+        go build
+        -ldflags="-X {{.MODULE}}/internal/version.Version={{.VERSION}}
+        -X {{.MODULE}}/internal/version.Commit={{.COMMIT}}
+        -X {{.MODULE}}/internal/version.Date={{.DATE}}"
+        ./cmd/rootcanal
+
+  test:
+    desc: Run tests with race detector
+    cmds:
+      - go test ./... -race -count=1
+
+  cover:
+    desc: Run tests and enforce ≥{{.MIN_COVERAGE}}% line coverage
+    cmds:
+      - go test ./... -race -coverprofile=coverage.out -coverpkg=./internal/...
+      - go tool cover -func=coverage.out
+      - |
+        pct=$(go tool cover -func=coverage.out | awk '/^total:/{gsub(/%/,"",$NF); print $NF}')
+        echo "Coverage: ${pct}%  (min {{.MIN_COVERAGE}}%)"
+        awk -v p="${pct}" -v m="{{.MIN_COVERAGE}}" 'BEGIN{if(p+0<m+0){print "FAIL: coverage " p "% is below " m "% minimum"; exit 1}}'
+
+  lint:
+    desc: Run go vet and staticcheck (install staticcheck once with go install honnef.co/go/tools/cmd/staticcheck@latest)
+    cmds:
+      - go vet ./...
+      - staticcheck ./...
+
+  tidy:
+    desc: Run go mod tidy
+    cmds:
+      - go mod tidy
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f rootcanal rootcanal.exe coverage.out coverage.xml
+
+  run:
+    desc: Run rootcanal (pass args after --, e.g. task run -- -config rootcanal.yaml)
+    cmds:
+      - go run ./cmd/rootcanal {{.CLI_ARGS}}

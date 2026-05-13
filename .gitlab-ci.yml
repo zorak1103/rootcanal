@@ -1,0 +1,66 @@
+stages:
+  - verify
+  - test
+  - build
+
+variables:
+  GOMODCACHE: "$CI_PROJECT_DIR/.go/pkg/mod"
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  GO_VERSION: "1.26"
+
+default:
+  image: golang:${GO_VERSION}
+  before_script:
+    - export PATH="${GOPATH}/bin:${PATH}"
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .go/pkg/mod/
+
+lint:
+  stage: verify
+  script:
+    - go vet ./...
+    - go install honnef.co/go/tools/cmd/staticcheck@latest
+    - staticcheck ./...
+
+test:
+  stage: test
+  script:
+    - go test ./... -race -count=1
+
+cover:
+  stage: test
+  script:
+    - go test ./... -race -coverprofile=coverage.out -coverpkg=./internal/...
+    - go tool cover -func=coverage.out
+    - |
+      pct=$(go tool cover -func=coverage.out | awk '/^total:/{gsub(/%/,"",$NF); print $NF}')
+      echo "Coverage: ${pct}%  (min 85.0%)"
+      awk -v p="${pct}" 'BEGIN{if(p+0<85.0){print "FAIL: coverage below 85%"; exit 1}}'
+  coverage: '/^total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+build:
+  stage: build
+  script:
+    - go build ./cmd/rootcanal
+  artifacts:
+    paths:
+      - rootcanal
+    expire_in: 1 week
+
+# macOS and Windows runners are available with appropriate GitLab runner tags.
+# Add parallel jobs here once runners are configured:
+#   build:macos:
+#     tags: [macos]
+#     ...
+#   build:windows:
+#     tags: [windows]
+#     ...
