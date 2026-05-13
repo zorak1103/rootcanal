@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
+	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -353,6 +355,18 @@ func TestManager_GC_IdleSession(t *testing.T) {
 
 // ---- newSessionID ----
 
+func TestNewSessionID_PanicOnRandError(t *testing.T) {
+	old := randRead
+	randRead = func(b []byte) (int, error) { return 0, errors.New("hardware RNG unavailable") }
+	t.Cleanup(func() { randRead = old })
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when randRead fails")
+		}
+	}()
+	newSessionID()
+}
+
 func TestNewSessionID_Format(t *testing.T) {
 	id := newSessionID()
 	if len(id) < 4 || id[:2] != "s_" {
@@ -368,5 +382,108 @@ func TestNewSessionID_Unique(t *testing.T) {
 			t.Fatalf("duplicate session ID: %q", id)
 		}
 		seen[id] = true
+	}
+}
+
+// ---- realSSHSession.setOutput ----
+
+func TestRealSSHSession_setOutput(t *testing.T) {
+	var buf bytes.Buffer
+	raw := &ssh.Session{}
+	s := &realSSHSession{raw}
+	s.setOutput(&buf)
+	if raw.Stdout != &buf {
+		t.Error("setOutput must assign Stdout")
+	}
+	if raw.Stderr != &buf {
+		t.Error("setOutput must assign Stderr")
+	}
+}
+
+// ---- NewManager production wiring ----
+
+func TestNewManager_Wiring(t *testing.T) {
+	// Use an unreachable address so pool.Get fails fast, exercising the factory closure.
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxSessionsTotal: 32, MaxSessionsPerHost: 4,
+			DefaultIdleTimeout: 15 * time.Minute, MaxSessionAge: 4 * time.Hour,
+			OutputBufferBytes: 4096, DefaultSendTimeoutMs: 2000, MaxSendTimeoutMs: 30000,
+			DialTimeout: 200 * time.Millisecond,
+		},
+		Hosts: map[string]config.Host{
+			"h": {Address: "127.0.0.1:1", User: "u", KnownHosts: "system",
+				Auth: config.Auth{Type: "password", PasswordEnv: "TEST_NM_WIRING_PASS"}},
+		},
+	}
+	t.Setenv("TEST_NM_WIRING_PASS", "x")
+	pool := hostpool.New(cfg, sshconn.ProdDialer{})
+	mgr := NewManager(cfg, pool, nil)
+
+	// Open invokes the factory closure; connection to 127.0.0.1:1 fails fast.
+	_, _ = mgr.Open(context.Background(), "h")
+
+	mgr.Shutdown(context.Background())
+	pool.Close()
+}
+
+// ---- Send on a session whose closed flag is set (in-map closed branch) ----
+
+func TestManager_Send_SessionMarkedClosed(t *testing.T) {
+	fs := newFakeSession()
+	m := newManager(minCfg(), fakeSessions(fs), nil)
+	defer m.Shutdown(context.Background())
+
+	id, err := m.Open(context.Background(), "h")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Mark the session closed without removing it from the map.
+	m.mu.RLock()
+	s := m.sessions[id]
+	m.mu.RUnlock()
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+
+	output, _, closed, err := m.Send(context.Background(), id, nil, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !closed {
+		t.Error("expected closed=true for session with closed flag set")
+	}
+	if output != nil {
+		t.Errorf("expected nil output, got %q", output)
+	}
+}
+
+// ---- ringBuf zero-capacity fallback ----
+
+func TestRingBuf_ZeroCapacity(t *testing.T) {
+	rb := newRingBuf(0)
+	if rb.cap != 1<<20 {
+		t.Errorf("expected 1 MiB fallback capacity, got %d", rb.cap)
+	}
+}
+
+// ---- ringBuf WaitForData quiescence reset ----
+
+func TestRingBuf_WaitForData_QuiesceReset(t *testing.T) {
+	rb := newRingBuf(256)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		rb.Write([]byte("first"))
+		// Second write arrives during quiescence window — resets the timer.
+		time.Sleep(30 * time.Millisecond)
+		rb.Write([]byte("second"))
+	}()
+
+	rb.WaitForData(context.Background(), 60*time.Millisecond, 2*time.Second)
+	got, _ := rb.Drain()
+	if !bytes.Contains(got, []byte("first")) || !bytes.Contains(got, []byte("second")) {
+		t.Errorf("expected both writes in output, got %q", got)
 	}
 }

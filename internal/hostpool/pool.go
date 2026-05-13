@@ -11,7 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const idleTimeout = 30 * time.Second
+var idleTimeout = 30 * time.Second
 
 type entry struct {
 	client    *ssh.Client

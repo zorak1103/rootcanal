@@ -192,6 +192,62 @@ func TestTool_SessionClose(t *testing.T) {
 	}
 }
 
+func TestTool_SessionSend_Error(t *testing.T) {
+	mgr := &fakeManager{
+		sendFn: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, bool, bool, error) {
+			return nil, false, false, errors.New("session gone")
+		},
+	}
+	sess := newTestClient(t, mgr, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_session_send",
+		Arguments: map[string]any{"session_id": "s_DEAD", "input": "ls\n"},
+	})
+	if err != nil {
+		t.Fatalf("protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for send error")
+	}
+}
+
+func TestTool_SessionClose_Error(t *testing.T) {
+	mgr := &fakeManager{
+		closeFn: func(_ context.Context, _ string) error {
+			return errors.New("session not found")
+		},
+	}
+	sess := newTestClient(t, mgr, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_session_close",
+		Arguments: map[string]any{"session_id": "s_GONE"},
+	})
+	if err != nil {
+		t.Fatalf("protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for close error")
+	}
+}
+
+func TestTool_SessionList_Empty(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_session_list",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
+	}
+}
+
 func TestTool_SessionList(t *testing.T) {
 	now := time.Now()
 	mgr := &fakeManager{
@@ -307,6 +363,118 @@ func TestTool_SFTPWrite_InvalidMode(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Error("expected IsError=true for invalid mode")
+	}
+}
+
+func TestTool_SFTPRead_Binary(t *testing.T) {
+	ops := &fakeOps{
+		readFn: func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) {
+			return []byte{0x00, 0x01, 0x02}, true, nil // binary data
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_read",
+		Arguments: map[string]any{"host": "h", "path": "/bin/data"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
+	}
+	raw, _ := json.Marshal(res.StructuredContent)
+	if !containsStr(raw, "binary") {
+		t.Errorf("expected binary field in output: %s", raw)
+	}
+}
+
+func TestTool_SFTPWrite_Binary(t *testing.T) {
+	var written []byte
+	ops := &fakeOps{
+		writeFn: func(_ context.Context, _, _ string, content []byte, _ fs.FileMode) error {
+			written = append([]byte{}, content...)
+			return nil
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	// "hello" base64-encoded = "aGVsbG8="
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "sftp_write",
+		Arguments: map[string]any{
+			"host": "h", "path": "/tmp/bin", "content": "aGVsbG8=", "binary": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
+	}
+	if string(written) != "hello" {
+		t.Errorf("expected decoded 'hello', got %q", written)
+	}
+}
+
+func TestTool_SFTPWrite_BadBase64(t *testing.T) {
+	ops := &fakeOps{
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "sftp_write",
+		Arguments: map[string]any{
+			"host": "h", "path": "/tmp/f", "content": "NOT!!!VALID!!!BASE64!!!", "binary": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for invalid base64")
+	}
+}
+
+func TestTool_SFTPList_Error(t *testing.T) {
+	ops := &fakeOps{
+		listFn: func(_ context.Context, _, _ string) ([]sftpops.Entry, error) {
+			return nil, errors.New("permission denied")
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_list",
+		Arguments: map[string]any{"host": "h", "path": "/root"},
+	})
+	if err != nil {
+		t.Fatalf("protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for list error")
+	}
+}
+
+func TestTool_SFTPList_Empty(t *testing.T) {
+	ops := &fakeOps{
+		listFn: func(_ context.Context, _, _ string) ([]sftpops.Entry, error) {
+			return []sftpops.Entry{}, nil
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_list",
+		Arguments: map[string]any{"host": "h", "path": "/empty"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
 	}
 }
 

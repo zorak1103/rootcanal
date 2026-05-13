@@ -3,15 +3,24 @@ package sftpops
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"io"
 	"io/fs"
+	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
+	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // ---- fake pool getter ----
@@ -125,6 +134,23 @@ func newTestOps(cfg *config.Config, get poolGetter, ffs *fakeFS) *ops {
 	return newOps(cfg, get, func(_ *ssh.Client) (sftpClientIface, error) {
 		return ffs, nil
 	})
+}
+
+// ---- fakePoolImpl for testing New() ----
+
+type fakePoolImpl struct{}
+
+func (f *fakePoolImpl) Get(_ context.Context, _ string) (*ssh.Client, func(), error) {
+	return nil, func() {}, errors.New("fake: no connection")
+}
+
+// ---- New ----
+
+func TestNew_ReturnsNonNil(t *testing.T) {
+	ops := New(minCfg(), &fakePoolImpl{})
+	if ops == nil {
+		t.Fatal("New must return a non-nil Ops")
+	}
 }
 
 // ---- Read tests ----
@@ -319,6 +345,138 @@ func TestList_ReadDirError(t *testing.T) {
 	_, err := o.List(context.Background(), "h", "/no/dir")
 	if err == nil {
 		t.Fatal("expected readdir error")
+	}
+}
+
+// ---- SFTP integration test (covers defaultNewClient + realSFTPClient adapters) ----
+
+func startSFTPServer(t *testing.T) (addr, khPath string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSigner, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvCfg := &ssh.ServerConfig{NoClientAuth: true}
+	srvCfg.AddHostKey(serverSigner)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr = ln.Addr().String()
+	t.Cleanup(func() { ln.Close() })
+
+	khPath = filepath.Join(t.TempDir(), "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize(addr)}, serverSigner.PublicKey())
+	if err := os.WriteFile(khPath, []byte(line+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveSFTPConn(conn, srvCfg)
+		}
+	}()
+	return addr, khPath
+}
+
+func serveSFTPConn(conn net.Conn, cfg *ssh.ServerConfig) {
+	_, chans, reqs, err := ssh.NewServerConn(conn, cfg)
+	if err != nil {
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	for newChan := range chans {
+		if newChan.ChannelType() != "session" {
+			newChan.Reject(ssh.UnknownChannelType, "")
+			continue
+		}
+		ch, requests, err := newChan.Accept()
+		if err != nil {
+			continue
+		}
+		go func(ch ssh.Channel, reqs <-chan *ssh.Request) {
+			defer ch.Close()
+			for req := range reqs {
+				if req.Type == "subsystem" && len(req.Payload) > 4 && string(req.Payload[4:]) == "sftp" {
+					req.Reply(true, nil)
+					srv, err := sftp.NewServer(ch)
+					if err != nil {
+						return
+					}
+					srv.Serve()
+					return
+				}
+				req.Reply(false, nil)
+			}
+		}(ch, requests)
+	}
+}
+
+func TestOps_SFTPIntegration(t *testing.T) {
+	addr, khPath := startSFTPServer(t)
+	t.Setenv("TEST_SFTP_INT_PASS", "irrelevant")
+	dir := t.TempDir()
+
+	cfg := &config.Config{
+		Limits: config.Limits{
+			SFTPMaxReadBytes:  5 << 20,
+			SFTPMaxWriteBytes: 25 << 20,
+		},
+		Hosts: map[string]config.Host{
+			"sftp-test": {
+				Address:    addr,
+				User:       "u",
+				KnownHosts: khPath,
+				Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_SFTP_INT_PASS"},
+			},
+		},
+	}
+
+	pool := hostpool.New(cfg, sshconn.ProdDialer{})
+	defer pool.Close()
+
+	ops := New(cfg, pool)
+
+	// Write a file via SFTP.
+	testFile := filepath.Join(dir, "hello.txt")
+	if err := ops.Write(context.Background(), "sftp-test", testFile, []byte("hello sftp\n"), 0); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Read it back.
+	data, binary, err := ops.Read(context.Background(), "sftp-test", testFile, 0)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if binary {
+		t.Error("expected text, not binary")
+	}
+	if string(data) != "hello sftp\n" {
+		t.Errorf("Read = %q, want %q", data, "hello sftp\n")
+	}
+
+	// List the directory.
+	entries, err := ops.List(context.Background(), "sftp-test", dir)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name == "hello.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("hello.txt not found in directory listing")
 	}
 }
 

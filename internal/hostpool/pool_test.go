@@ -180,6 +180,73 @@ func TestPool_GetAndRelease(t *testing.T) {
 	}
 }
 
+func TestPool_PartialRelease_NoTimer(t *testing.T) {
+	// Two refs to same host; releasing one should NOT start the idle timer.
+	addr, khPath := startSSHServer(t)
+	t.Setenv("TEST_PARTIAL_PASS", "irrelevant")
+
+	cfg := minCfg(map[string]config.Host{
+		"srv": {Address: addr, User: "u", KnownHosts: khPath,
+			Auth: config.Auth{Type: "password", PasswordEnv: "TEST_PARTIAL_PASS"}},
+	})
+	p := New(cfg, sshconn.ProdDialer{})
+	t.Cleanup(p.Close)
+
+	_, release1, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get 1: %v", err)
+	}
+	_, release2, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get 2: %v", err)
+	}
+
+	release1() // refs: 2 → 1; timer must NOT start
+
+	p.mu.Lock()
+	e := p.entries["srv"]
+	p.mu.Unlock()
+
+	if e.refs != 1 {
+		t.Errorf("expected refs=1, got %d", e.refs)
+	}
+	if e.idleTimer != nil {
+		t.Error("idle timer must not start while refs > 0")
+	}
+	release2()
+}
+
+func TestPool_IdleTimerFires(t *testing.T) {
+	old := idleTimeout
+	idleTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { idleTimeout = old })
+
+	addr, khPath := startSSHServer(t)
+	t.Setenv("TEST_IDLE_PASS", "irrelevant")
+
+	cfg := minCfg(map[string]config.Host{
+		"srv": {Address: addr, User: "u", KnownHosts: khPath,
+			Auth: config.Auth{Type: "password", PasswordEnv: "TEST_IDLE_PASS"}},
+	})
+	p := New(cfg, sshconn.ProdDialer{})
+	t.Cleanup(p.Close)
+
+	_, release, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	release() // refs → 0, idle timer starts
+
+	time.Sleep(60 * time.Millisecond) // wait for timer to fire
+
+	p.mu.Lock()
+	_, exists := p.entries["srv"]
+	p.mu.Unlock()
+	if exists {
+		t.Error("expected entry to be evicted after idle timeout")
+	}
+}
+
 func TestPool_CloseWithActiveEntries(t *testing.T) {
 	addr, khPath := startSSHServer(t)
 	t.Setenv("TEST_POOL_CLOSE_PASS", "irrelevant")

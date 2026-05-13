@@ -258,6 +258,54 @@ func TestBuildClientConfig_BadKnownHosts(t *testing.T) {
 	}
 }
 
+func TestBuildAuthMethods_AgentBranch(t *testing.T) {
+	// Exercises the "agent" case in buildAuthMethods regardless of whether
+	// the agent is actually running.
+	_, _ = buildAuthMethods(config.Host{Auth: config.Auth{Type: "agent"}})
+}
+
+func TestBuildAuthMethods_UnknownType(t *testing.T) {
+	_, err := buildAuthMethods(config.Host{Auth: config.Auth{Type: "kerberos"}})
+	if err == nil {
+		t.Fatal("expected error for unknown auth type")
+	}
+}
+
+func TestProdDialer_Dial_BadHandshake(t *testing.T) {
+	// TCP listener that accepts but does not speak SSH → handshake must fail.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		conn.Write([]byte("I am not SSH\r\n"))
+		conn.Close()
+	}()
+
+	dir := t.TempDir()
+	kh := filepath.Join(dir, "kh")
+	os.WriteFile(kh, []byte("# empty\n"), 0600)
+	t.Setenv("TEST_BADHS_PASS", "x")
+
+	h := config.Host{
+		Address:    addr,
+		User:       "u",
+		KnownHosts: kh,
+		Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_BADHS_PASS"},
+	}
+	_, err = ProdDialer{}.Dial(context.Background(), h, config.Limits{DialTimeout: 2 * time.Second})
+	if err == nil {
+		t.Fatal("expected handshake error for non-SSH server")
+	}
+}
+
 func TestBuildClientConfig_KeyAuth(t *testing.T) {
 	dir := t.TempDir()
 	kh := filepath.Join(dir, "known_hosts")
