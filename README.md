@@ -1,62 +1,201 @@
 # rootcanal
 
-An SSH MCP server in Go. Lets an MCP client (e.g. Claude Desktop) drive SSH operations against a pre-declared set of remote hosts.
+**rootcanal** is an SSH MCP server written in Go. It lets an MCP client (Claude Desktop, the Claude CLI, or any MCP host) open persistent shell sessions and perform SFTP file operations on a pre-declared set of remote hosts.
 
-> **Status:** Under active development — see milestones in the project plan.
+```
+Claude Desktop ──(stdio MCP)──▶ rootcanal ──(SSH)──▶ remote hosts
+```
 
-## Features (v1.0.0)
+## Why rootcanal?
 
-- Persistent shell sessions (`ssh_session_open` / `ssh_session_send` / `ssh_session_close` / `ssh_session_list`)
-- SFTP file operations (`sftp_read` / `sftp_write` / `sftp_list`)
-- Pre-declared host allowlist — the LLM never reaches arbitrary IPs
-- Auth: public key, ssh-agent (cross-platform), password (env var)
-- Strict host-key verification via `known_hosts`
-- MCP stdio transport (Claude Desktop compatible)
+- **Pre-declared hosts only** — the LLM references hosts by name (e.g. `"prod-web"`), never by raw IP. It can only reach what you have explicitly listed in the config.
+- **Persistent shell sessions** — `ssh_session_send` keeps the shell alive across calls, so the LLM can run `sudo`, interact with a REPL, or chain multi-step commands naturally.
+- **Strict host-key verification** — `known_hosts`-based, no `InsecureIgnoreHostKey` anywhere, ever.
+- **No plaintext secrets** — passwords and passphrases come from environment variables, never from the config file.
+
+## Tools exposed
+
+| Tool | Description |
+|---|---|
+| `ssh_session_open` | Open a persistent shell session; returns a `session_id` |
+| `ssh_session_send` | Write to the shell's stdin, return stdout/stderr output |
+| `ssh_session_close` | Close the session and release resources |
+| `ssh_session_list` | List open sessions with timing metadata |
+| `sftp_read` | Read a remote file (UTF-8 or base64 for binary) |
+| `sftp_write` | Write a remote file (base64 accepted for binary) |
+| `sftp_list` | List a remote directory |
 
 ## Installation
 
+### Pre-built binaries
+
+Download the latest release for your platform from the [Releases page](https://gitlab.com/zorak1103/rootcanal/-/releases).
+
 ```sh
-go install gitlab.com/zorak1103/rootcanal/cmd/rootcanal@latest
+# Linux / macOS — extract and install
+tar -xzf rootcanal_v1.0.0_linux_amd64.tar.gz
+sudo mv rootcanal /usr/local/bin/
+
+# Windows — extract rootcanal.exe from the zip and add to PATH
 ```
 
-Or build from source:
+### Build from source
+
+Requires **Go 1.26+**.
 
 ```sh
 git clone https://gitlab.com/zorak1103/rootcanal.git
 cd rootcanal
-task build
+go install github.com/go-task/task/v3/cmd/task@latest   # build tool
+task build                                               # → ./rootcanal (or rootcanal.exe)
+```
+
+Or with plain `go`:
+
+```sh
+go build -o rootcanal ./cmd/rootcanal
 ```
 
 ## Configuration
 
-See [`examples/rootcanal.example.yaml`](examples/rootcanal.example.yaml) for an annotated config showing all auth types.
+Create a config file — `~/.config/rootcanal/config.yaml` on Linux/macOS, `%APPDATA%\rootcanal\config.yaml` on Windows — and declare your hosts.
+
+```yaml
+# ~/.config/rootcanal/config.yaml
+hosts:
+  prod-web:
+    address: web1.example.com:22
+    user: deploy
+    known_hosts: ~/.ssh/known_hosts
+    auth:
+      type: key
+      key_path: ~/.ssh/id_ed25519
+      passphrase_env: ROOTCANAL_PROD_PASSPHRASE   # optional
+
+  staging:
+    address: staging.example.com:22
+    user: ops
+    known_hosts: ~/.ssh/known_hosts
+    auth:
+      type: agent   # uses SSH_AUTH_SOCK (Linux/macOS) or OpenSSH agent (Windows)
+
+  legacy:
+    address: 10.0.0.7:2222
+    user: admin
+    known_hosts: ~/.ssh/known_hosts
+    auth:
+      type: password
+      password_env: ROOTCANAL_LEGACY_PASSWORD
+```
+
+Annotated example with all options: [`examples/rootcanal.example.yaml`](examples/rootcanal.example.yaml).
+
+**Validate your config** without connecting to anything:
+
+```sh
+rootcanal -validate-config -config ~/.config/rootcanal/config.yaml
+# → OK: 3 host(s) defined
+```
+
+**Test connectivity** to a single host:
+
+```sh
+rootcanal -probe prod-web -config ~/.config/rootcanal/config.yaml
+# → OK: connected to web1.example.com:22 as deploy
+```
 
 ## Claude Desktop integration
 
-Add to `claude_desktop_config.json`:
+Add rootcanal to your `claude_desktop_config.json`:
+
+**Linux / macOS** (`~/.config/claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "rootcanal": {
-      "command": "/path/to/rootcanal",
-      "args": ["-config", "/path/to/rootcanal.yaml"]
+      "command": "/usr/local/bin/rootcanal",
+      "args": ["-config", "/home/you/.config/rootcanal/config.yaml"]
     }
   }
 }
 ```
 
+**Windows** (`%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "rootcanal": {
+      "command": "C:\\tools\\rootcanal.exe",
+      "args": ["-config", "C:\\Users\\you\\AppData\\Roaming\\rootcanal\\config.yaml"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving. The rootcanal tools appear in the tool list.
+
+**Quick smoke test** — ask Claude:
+
+> *"Use rootcanal to open a session on `prod-web` and run `uname -a`."*
+
+Claude will call `ssh_session_open`, then `ssh_session_send("uname -a\n")`, then `ssh_session_close`.
+
+## SSH agent on Windows
+
+rootcanal connects to the **OpenSSH for Windows** agent via its named pipe. Enable it once:
+
+```powershell
+# Run as Administrator
+Set-Service -Name ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+
+# Add your key
+ssh-add $env:USERPROFILE\.ssh\id_ed25519
+```
+
+PuTTY/Pageant are not supported in v1.0.0.
+
+## Global limits (optional)
+
+```yaml
+limits:
+  max_sessions_total:    32      # hard cap across all hosts
+  max_sessions_per_host:  4      # also limits concurrent SFTP ops
+  default_idle_timeout:  15m     # GC closes sessions unused this long
+  max_session_age:        4h     # GC closes sessions older than this
+  output_buffer_bytes:   1048576 # 1 MiB ring buffer per session
+  sftp_max_read_bytes:   5242880 # 5 MiB per sftp_read call
+  sftp_max_write_bytes: 26214400 # 25 MiB per sftp_write call
+```
+
+## Known limitations
+
+- **Output framing is heuristic.** `ssh_session_send` returns output received within a timeout after a 50 ms quiescence gap. It may split output across two calls for long-running commands; the LLM handles this gracefully by calling `send` with empty input to poll for more.
+- **No `ssh_exec` (single-shot exec).** Use `ssh_session_open` + `ssh_session_send` + `ssh_session_close` instead. This is intentional: the persistent session model handles `sudo` prompts, REPLs, and multi-step commands naturally.
+- **No port forwarding** in v1.0.0.
+- **PuTTY/Pageant not supported** on Windows — use OpenSSH for Windows agent.
+
 ## Development
 
-Requires [Task](https://taskfile.dev) (`go install github.com/go-task/task/v3/cmd/task@latest`).
-
 ```sh
-task build    # build binary
-task test     # run tests with race detector
-task cover    # run tests + enforce ≥85% coverage
+task build    # compile binary
+task test     # run all tests
+task cover    # enforce ≥85% coverage
 task lint     # go vet + staticcheck
 task run      # run locally (pass args after --)
 ```
+
+Race detector (requires CGO):
+
+```sh
+CGO_ENABLED=1 go test ./... -race
+```
+
+## Security
+
+See [docs/security.md](docs/security.md) for the full threat model and security boundary documentation.
 
 ## License
 
