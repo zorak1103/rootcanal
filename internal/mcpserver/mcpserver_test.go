@@ -37,7 +37,7 @@ func (f *fakeManager) Shutdown(_ context.Context) error { return nil }
 
 func newTestClient(t *testing.T, mgr session.Manager) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr)
+	srv := mcpserver.New(mgr, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -195,6 +195,35 @@ func TestTool_SessionList(t *testing.T) {
 	raw, _ := json.Marshal(res.StructuredContent)
 	if !containsStr(raw, "s_AAA") {
 		t.Errorf("expected session s_AAA in list output: %s", raw)
+	}
+}
+
+func TestOnInitialized_IsCalled(t *testing.T) {
+	called := make(chan struct{}, 1)
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+
+	srv := mcpserver.New(mgr, func(_ *mcp.ServerSession) {
+		called <- struct{}{}
+	})
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = srv.Run(ctx, t1) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-init"}, nil)
+	sess, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	select {
+	case <-called:
+		// onInitialized was invoked as expected
+	case <-time.After(2 * time.Second):
+		t.Error("onInitialized callback was not called within 2s")
 	}
 }
 

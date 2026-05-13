@@ -9,10 +9,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
+	"gitlab.com/zorak1103/rootcanal/internal/logging"
 	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
 	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
@@ -60,17 +62,31 @@ func main() {
 		return
 	}
 
-	// Run as MCP server.
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// MCP server mode.
+	//
+	// Before the MCP session is established, log to stderr (safe — the stdio
+	// transport only reads stdout). Once the session handshake completes, swap
+	// to mcp.NewLoggingHandler so subsequent logs reach the client via the
+	// notifications/message channel.
+	swap := logging.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log := slog.New(swap)
+
 	pool := hostpool.New(cfg, sshconn.ProdDialer{})
 	mgr := session.NewManager(cfg, pool, log)
 
-	srv := mcpserver.New(mgr)
+	srv := mcpserver.New(mgr, func(ss *mcp.ServerSession) {
+		mcpH := mcp.NewLoggingHandler(ss, &mcp.LoggingHandlerOptions{
+			LoggerName:  "rootcanal",
+			MinInterval: 100 * time.Millisecond,
+		})
+		swap.Swap(mcpH)
+		log.Info("MCP logging active", "version", version.Version)
+	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	log.Info("rootcanal MCP server starting", "version", version.Version, "hosts", len(cfg.Hosts))
+	log.Info("rootcanal starting", "version", version.Version, "hosts", len(cfg.Hosts))
 
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Error("server exited with error", "err", err)
