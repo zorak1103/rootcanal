@@ -1,0 +1,63 @@
+# rootcanal example configuration
+# Copy to ~/.config/rootcanal/config.yaml and edit to match your hosts.
+#
+# Secrets must come from environment variables — never put passwords or
+# passphrases directly in this file. Use ${ENV_VAR} (required) or
+# ${ENV_VAR:-default} (optional with fallback).
+
+# Global resource limits and timeouts. All fields have safe defaults.
+limits:
+  max_sessions_total: 32          # hard cap across all hosts
+  max_sessions_per_host: 4        # per-host cap; also limits SFTP ops
+  default_idle_timeout: 15m       # close sessions unused for this long
+  max_session_age: 4h             # close sessions older than this regardless
+  output_buffer_bytes: 1048576    # 1 MiB ring buffer per session
+  dial_timeout: 10s               # SSH connection timeout
+  default_send_timeout_ms: 2000   # default max wait for output per Send call
+  max_send_timeout_ms: 30000      # caller-supplied timeout is capped here
+  sftp_max_read_bytes: 5242880    # 5 MiB — largest file sftp_read will return
+  sftp_max_write_bytes: 26214400  # 25 MiB — largest write sftp_write accepts
+
+# Pre-declared hosts. The LLM references these by name (e.g. host: "prod-web").
+# It can never reach an IP or hostname not listed here.
+hosts:
+
+  # --- Public-key authentication ---
+  prod-web:
+    address: web1.example.com:22    # host:port; port defaults to 22 if omitted
+    user: deploy
+    description: "Production web server"
+    known_hosts: ~/.ssh/known_hosts  # path, or "system" for the default location
+    idle_timeout: 30m                # overrides the global default for this host
+    auth:
+      type: key
+      key_path: ~/.ssh/id_ed25519
+      # If the key is passphrase-protected, provide the env var name:
+      passphrase_env: ROOTCANAL_PROD_WEB_PASSPHRASE   # optional
+
+  # --- SSH agent authentication ---
+  staging-db:
+    address: db.staging.example.com:22
+    user: ops
+    known_hosts: /etc/rootcanal/known_hosts.staging
+    auth:
+      type: agent
+      # Uses SSH_AUTH_SOCK on Linux/macOS.
+      # Uses \\.\pipe\openssh-ssh-agent (OpenSSH for Windows) on Windows.
+
+  # --- Password authentication ---
+  legacy-box:
+    address: 10.0.0.7:2222
+    user: admin
+    known_hosts: ~/.ssh/known_hosts
+    auth:
+      type: password
+      password_env: ROOTCANAL_LEGACY_PASSWORD   # env var holding the password
+
+  # --- Using ${ENV_VAR} interpolation in any field ---
+  dynamic-host:
+    address: ${DYNAMIC_HOST_ADDR:-internal.example.com:22}
+    user: ${DYNAMIC_HOST_USER:-ubuntu}
+    known_hosts: ${DYNAMIC_HOST_KH:-~/.ssh/known_hosts}
+    auth:
+      type: agent

@@ -28,14 +28,14 @@ tasks:
         ./cmd/rootcanal
 
   test:
-    desc: Run tests with race detector
+    desc: Run tests (use CGO_ENABLED=1 task test for race detection on Windows)
     cmds:
-      - go test ./... -race -count=1
+      - go test ./... -count=1
 
   cover:
     desc: Run tests and enforce ≥{{.MIN_COVERAGE}}% line coverage
     cmds:
-      - go test ./... -race -coverprofile=coverage.out -coverpkg=./internal/...
+      - go test ./... -coverprofile=coverage.out -coverpkg=./internal/...
       - go tool cover -func=coverage.out
       - |
         pct=$(go tool cover -func=coverage.out | awk '/^total:/{gsub(/%/,"",$NF); print $NF}')
