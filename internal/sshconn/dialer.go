@@ -31,7 +31,7 @@ func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits)
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, h.Address, cfg)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("SSH handshake %s: %w", h.Address, err)
 	}
 

@@ -18,6 +18,15 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+// funcDialer is an injectable Dialer backed by a closure.
+type funcDialer struct {
+	fn func(context.Context, config.Host, config.Limits) (*ssh.Client, error)
+}
+
+func (d *funcDialer) Dial(ctx context.Context, h config.Host, l config.Limits) (*ssh.Client, error) {
+	return d.fn(ctx, h, l)
+}
+
 // fakeDialer is an injectable Dialer for pool tests.
 type fakeDialer struct {
 	client *ssh.Client
@@ -270,5 +279,100 @@ func TestPool_CloseWithActiveEntries(t *testing.T) {
 	p.Close() // must not panic even with active refs
 	if len(p.entries) != 0 {
 		t.Errorf("expected empty pool after Close, got %d entries", len(p.entries))
+	}
+}
+
+// ---- lost-race paths ----
+
+// TestPool_LostRace_PrefersExistingEntry exercises the code path where a
+// concurrent dial completes after another goroutine already inserted an entry.
+// The dialer injects the "existing" entry into the pool while it runs, then
+// returns a "duplicate" client that the lost-race path should discard.
+func TestPool_LostRace_PrefersExistingEntry(t *testing.T) {
+	addr, khPath := startSSHServer(t)
+	t.Setenv("TEST_LOSTRACE_PASS", "irrelevant")
+
+	host := config.Host{
+		Address: addr, User: "u", KnownHosts: khPath,
+		Auth: config.Auth{Type: "password", PasswordEnv: "TEST_LOSTRACE_PASS"},
+	}
+	cfg := minCfg(map[string]config.Host{"srv": host})
+
+	var p *Pool
+	var existingClient *ssh.Client
+
+	d := &funcDialer{fn: func(ctx context.Context, h config.Host, l config.Limits) (*ssh.Client, error) {
+		dup, err := sshconn.ProdDialer{}.Dial(ctx, h, l)
+		if err != nil {
+			return nil, err
+		}
+		existing, err := sshconn.ProdDialer{}.Dial(ctx, h, l)
+		if err != nil {
+			_ = dup.Close()
+			return nil, err
+		}
+		existingClient = existing
+		// Inject the existing entry with an idle timer to also cover the
+		// idle-timer-stop branch in the lost-race path.
+		timer := time.AfterFunc(1*time.Hour, func() { /* sentinel */ })
+		p.mu.Lock()
+		p.entries["srv"] = &entry{client: existing, refs: 1, idleTimer: timer}
+		p.mu.Unlock()
+		return dup, nil // will be closed by lost-race path
+	}}
+
+	p = New(cfg, d)
+	t.Cleanup(p.Close)
+
+	client, release, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get() unexpected error: %v", err)
+	}
+	defer release()
+
+	if client != existingClient {
+		t.Error("lost-race path should prefer the existing entry, not the duplicate")
+	}
+	p.mu.Lock()
+	e := p.entries["srv"]
+	p.mu.Unlock()
+	if e.refs != 2 {
+		t.Errorf("expected refs=2 after lost-race bump, got %d", e.refs)
+	}
+	if e.idleTimer != nil {
+		t.Error("idle timer should have been cleared in lost-race path")
+	}
+}
+
+// TestPool_LostRace_CapExceeded covers the per-host cap check in the lost-race path.
+func TestPool_LostRace_CapExceeded(t *testing.T) {
+	addr, khPath := startSSHServer(t)
+	t.Setenv("TEST_LOSTRACE_CAP_PASS", "irrelevant")
+
+	host := config.Host{
+		Address: addr, User: "u", KnownHosts: khPath,
+		Auth: config.Auth{Type: "password", PasswordEnv: "TEST_LOSTRACE_CAP_PASS"},
+	}
+	cfg := minCfg(map[string]config.Host{"srv": host})
+
+	var p *Pool
+	d := &funcDialer{fn: func(ctx context.Context, h config.Host, l config.Limits) (*ssh.Client, error) {
+		dup, err := sshconn.ProdDialer{}.Dial(ctx, h, l)
+		if err != nil {
+			return nil, err
+		}
+		// Inject entry already at the per-host limit.
+		p.mu.Lock()
+		p.entries["srv"] = &entry{client: nil, refs: cfg.Limits.MaxSessionsPerHost}
+		p.mu.Unlock()
+		return dup, nil
+	}}
+
+	p = New(cfg, d)
+	t.Cleanup(p.Close)
+
+	_, _, err := p.Get(context.Background(), "srv")
+	if err == nil {
+		t.Fatal("expected cap-exceeded error on lost-race path")
 	}
 }

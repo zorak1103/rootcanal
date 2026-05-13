@@ -91,7 +91,7 @@ func (o *ops) openSFTP(ctx context.Context, host string) (sftpClientIface, func(
 		return nil, nil, fmt.Errorf("opening SFTP on %q: %w", host, err)
 	}
 	cleanup := func() {
-		sftpClient.Close()
+		_ = sftpClient.Close()
 		release()
 	}
 	return sftpClient, cleanup, nil
@@ -140,10 +140,15 @@ func (o *ops) Write(ctx context.Context, host, path string, content []byte, mode
 	if err != nil {
 		return fmt.Errorf("opening %q on %q for write: %w", path, host, err)
 	}
-	defer f.Close()
 
 	if _, err := f.Write(content); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("writing to %q on %q: %w", path, host, err)
+	}
+
+	// Close commits the SFTP write; errors here indicate data loss.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing %q on %q after write: %w", path, host, err)
 	}
 
 	if mode != 0 {

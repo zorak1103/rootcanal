@@ -52,7 +52,12 @@ type sessionSendOut struct {
 
 func handleSessionSend(mgr session.Manager) func(context.Context, *mcp.CallToolRequest, sessionSendIn) (*mcp.CallToolResult, sessionSendOut, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in sessionSendIn) (*mcp.CallToolResult, sessionSendOut, error) {
-		timeout := time.Duration(in.TimeoutMs) * time.Millisecond
+		const maxToolTimeoutMs = 24 * 60 * 60 * 1000 // 1 day; prevents int64 overflow on multiply
+		ms := in.TimeoutMs
+		if ms < 0 || ms > maxToolTimeoutMs {
+			ms = 0
+		}
+		timeout := time.Duration(ms) * time.Millisecond
 
 		raw, truncated, closed, err := mgr.Send(ctx, in.SessionID, []byte(in.Input), timeout)
 		if err != nil {

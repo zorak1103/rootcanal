@@ -78,6 +78,7 @@ type manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
 	perHost  map[string]int
+	stopping bool
 
 	gcStop chan struct{}
 	gcDone chan struct{}
@@ -114,32 +115,27 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}); err != nil {
-		sshSess.Close()
+		_ = sshSess.Close()
 		releasePool()
 		return "", fmt.Errorf("requesting PTY for %q: %w", host, err)
 	}
 
 	stdin, err := sshSess.StdinPipe()
 	if err != nil {
-		sshSess.Close()
+		_ = sshSess.Close()
 		releasePool()
 		return "", fmt.Errorf("getting stdin pipe for %q: %w", host, err)
 	}
 
 	if err := sshSess.Shell(); err != nil {
-		sshSess.Close()
+		_ = sshSess.Close()
 		releasePool()
 		return "", fmt.Errorf("starting shell on %q: %w", host, err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		_ = sshSess.Wait()
-		close(done)
-	}()
-
 	now := time.Now()
 	id := newSessionID()
+	done := make(chan struct{})
 	s := &session{
 		id:          id,
 		host:        host,
@@ -153,9 +149,21 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 	}
 
 	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		_ = sshSess.Close()
+		releasePool()
+		return "", fmt.Errorf("manager is shutting down")
+	}
 	m.sessions[id] = s
 	m.perHost[host]++
 	m.mu.Unlock()
+
+	// Launch Wait goroutine after registration so Shutdown cannot miss this session.
+	go func() {
+		_ = sshSess.Wait()
+		close(done)
+	}()
 
 	if m.log != nil {
 		m.log.Info("session opened", "id", id, "host", host)
@@ -192,8 +200,19 @@ func (m *manager) Send(ctx context.Context, id string, input []byte, timeout tim
 	s.mu.Unlock()
 
 	if len(input) > 0 {
-		if _, err := s.stdin.Write(input); err != nil {
-			return nil, false, false, fmt.Errorf("writing to session %q stdin: %w", id, err)
+		type writeResult struct{ err error }
+		ch := make(chan writeResult, 1)
+		go func() {
+			_, err := s.stdin.Write(input)
+			ch <- writeResult{err}
+		}()
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				return nil, false, false, fmt.Errorf("writing to session %q stdin: %w", id, r.err)
+			}
+		case <-ctx.Done():
+			return nil, false, false, ctx.Err()
 		}
 	}
 
@@ -231,8 +250,12 @@ func (m *manager) Close(_ context.Context, id string) error {
 	s.closed = true
 	s.mu.Unlock()
 
-	s.stdin.Close()
-	s.sshSess.Close()
+	// Wait for any in-flight Send to complete before closing pipes.
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
+	_ = s.stdin.Close()
+	_ = s.sshSess.Close()
 	s.releasePool()
 
 	if m.log != nil {
@@ -260,11 +283,15 @@ func (m *manager) List() []SessionInfo {
 	return infos
 }
 
-func (m *manager) Shutdown(_ context.Context) error {
+func (m *manager) Shutdown(ctx context.Context) error {
 	close(m.gcStop)
-	<-m.gcDone
+	select {
+	case <-m.gcDone:
+	case <-ctx.Done():
+	}
 
 	m.mu.Lock()
+	m.stopping = true
 	ids := make([]string, 0, len(m.sessions))
 	for id := range m.sessions {
 		ids = append(ids, id)
@@ -272,9 +299,12 @@ func (m *manager) Shutdown(_ context.Context) error {
 	m.mu.Unlock()
 
 	for _, id := range ids {
-		_ = m.Close(context.Background(), id)
+		if ctx.Err() != nil {
+			break
+		}
+		_ = m.Close(ctx, id)
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (m *manager) runGC() {

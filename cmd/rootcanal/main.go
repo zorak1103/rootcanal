@@ -95,7 +95,9 @@ func main() {
 	}
 
 	log.Info("shutting down")
-	if err := mgr.Shutdown(context.Background()); err != nil {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := mgr.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown error", "err", err)
 	}
 	pool.Close()

@@ -70,13 +70,21 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 
 	p.mu.Lock()
 	// Another goroutine may have dialed concurrently; prefer the existing entry.
+	// Hold the lock from check through refs bump to avoid TOCTOU.
 	if existing, ok := p.entries[hostName]; ok {
-		p.mu.Unlock()
-		client.Close()
-		p.mu.Lock()
+		if p.cfg.Limits.MaxSessionsPerHost > 0 && existing.refs >= p.cfg.Limits.MaxSessionsPerHost {
+			p.mu.Unlock()
+			_ = client.Close()
+			return nil, nil, fmt.Errorf("host %q: per-host session limit of %d reached", hostName, p.cfg.Limits.MaxSessionsPerHost)
+		}
+		if existing.idleTimer != nil {
+			existing.idleTimer.Stop()
+			existing.idleTimer = nil
+		}
 		existing.refs++
 		c := existing.client
 		p.mu.Unlock()
+		_ = client.Close() // close the duplicate outside the lock
 		return c, p.releaseFunc(hostName), nil
 	}
 	p.entries[hostName] = &entry{client: client, refs: 1}
@@ -97,13 +105,15 @@ func (p *Pool) releaseFunc(hostName string) func() {
 		e.refs--
 		if e.refs <= 0 && e.idleTimer == nil {
 			e.idleTimer = time.AfterFunc(idleTimeout, func() {
+				var toClose *ssh.Client
 				p.mu.Lock()
-				defer p.mu.Unlock()
-				if e, ok := p.entries[hostName]; ok && e.refs <= 0 {
-					if e.client != nil {
-						e.client.Close()
-					}
+				if e2, ok := p.entries[hostName]; ok && e2.refs <= 0 {
+					toClose = e2.client
 					delete(p.entries, hostName)
+				}
+				p.mu.Unlock()
+				if toClose != nil {
+					_ = toClose.Close()
 				}
 			})
 		}
@@ -113,15 +123,19 @@ func (p *Pool) releaseFunc(hostName string) func() {
 // Close immediately closes all cached clients and stops idle timers.
 func (p *Pool) Close() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
+	clients := make([]*ssh.Client, 0, len(p.entries))
 	for name, e := range p.entries {
 		if e.idleTimer != nil {
 			e.idleTimer.Stop()
 		}
 		if e.client != nil {
-			e.client.Close()
+			clients = append(clients, e.client)
 		}
 		delete(p.entries, name)
+	}
+	p.mu.Unlock()
+
+	for _, c := range clients {
+		_ = c.Close()
 	}
 }
