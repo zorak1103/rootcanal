@@ -53,10 +53,21 @@ tasks:
     cmds:
       - go mod tidy
 
+  snapshot:
+    desc: Build cross-platform release archives locally without publishing (requires goreleaser)
+    cmds:
+      - goreleaser release --snapshot --clean
+
+  release:
+    desc: Publish a release to GitLab (run on a tagged commit; requires goreleaser + GITLAB_TOKEN)
+    cmds:
+      - goreleaser release --clean
+
   clean:
     desc: Remove build artifacts
     cmds:
       - rm -f rootcanal rootcanal.exe coverage.out coverage.xml
+      - rm -rf dist/
 
   run:
     desc: Run rootcanal (pass args after --, e.g. task run -- -config rootcanal.yaml)

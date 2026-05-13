@@ -1,0 +1,59 @@
+version: 2
+
+project_name: rootcanal
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/rootcanal
+    binary: rootcanal
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X gitlab.com/zorak1103/rootcanal/internal/version.Version={{.Version}}
+      - -X gitlab.com/zorak1103/rootcanal/internal/version.Commit={{.Commit}}
+      - -X gitlab.com/zorak1103/rootcanal/internal/version.Date={{.Date}}
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+      - examples/rootcanal.example.yaml
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^ci:"
+      - "Merge"
+
+release:
+  gitlab:
+    owner: zorak1103
+    name: rootcanal
+  draft: false
+  prerelease: auto
