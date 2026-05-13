@@ -17,6 +17,7 @@ import (
 	"gitlab.com/zorak1103/rootcanal/internal/logging"
 	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
+	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
 	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
 	"gitlab.com/zorak1103/rootcanal/internal/version"
 )
@@ -73,8 +74,9 @@ func main() {
 
 	pool := hostpool.New(cfg, sshconn.ProdDialer{})
 	mgr := session.NewManager(cfg, pool, log)
+	ops := sftpops.New(cfg, pool)
 
-	srv := mcpserver.New(mgr, func(ss *mcp.ServerSession) {
+	srv := mcpserver.New(mgr, ops, func(ss *mcp.ServerSession) {
 		mcpH := mcp.NewLoggingHandler(ss, &mcp.LoggingHandlerOptions{
 			LoggerName:  "rootcanal",
 			MinInterval: 100 * time.Millisecond,

@@ -1,0 +1,337 @@
+package sftpops
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"testing"
+	"time"
+
+	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"golang.org/x/crypto/ssh"
+)
+
+// ---- fake pool getter ----
+
+func okPool(c *ssh.Client) poolGetter {
+	return func(_ context.Context, _ string) (*ssh.Client, func(), error) {
+		return c, func() {}, nil
+	}
+}
+
+func errPool(err error) poolGetter {
+	return func(_ context.Context, _ string) (*ssh.Client, func(), error) {
+		return nil, nil, err
+	}
+}
+
+// ---- fake sftpClientIface ----
+
+type fakeFS struct {
+	files    map[string][]byte
+	dirs     map[string][]fs.FileInfo
+	openErr  error
+	writeErr error
+	chmodErr error
+	listErr  error
+}
+
+func newFakeFS() *fakeFS {
+	return &fakeFS{
+		files: make(map[string][]byte),
+		dirs:  make(map[string][]fs.FileInfo),
+	}
+}
+
+func (f *fakeFS) Open(path string) (io.ReadCloser, error) {
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
+	data, ok := f.files[path]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (f *fakeFS) OpenFile(path string, _ int) (io.WriteCloser, error) {
+	if f.writeErr != nil {
+		return nil, f.writeErr
+	}
+	return &captureBuf{path: path, fs: f}, nil
+}
+
+func (f *fakeFS) Chmod(_ string, _ fs.FileMode) error { return f.chmodErr }
+
+func (f *fakeFS) ReadDir(path string) ([]fs.FileInfo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	infos, ok := f.dirs[path]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return infos, nil
+}
+
+func (f *fakeFS) Close() error { return nil }
+
+// captureBuf captures Write calls and stores them in fakeFS on Close.
+type captureBuf struct {
+	path string
+	buf  bytes.Buffer
+	fs   *fakeFS
+}
+
+func (b *captureBuf) Write(p []byte) (int, error) { return b.buf.Write(p) }
+func (b *captureBuf) Close() error {
+	b.fs.files[b.path] = b.buf.Bytes()
+	return nil
+}
+
+// fakeFileInfo implements fs.FileInfo.
+type fakeFileInfo struct {
+	name  string
+	size  int64
+	mode  fs.FileMode
+	isDir bool
+}
+
+func (f fakeFileInfo) Name() string      { return f.name }
+func (f fakeFileInfo) Size() int64       { return f.size }
+func (f fakeFileInfo) Mode() fs.FileMode { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool       { return f.isDir }
+func (f fakeFileInfo) Sys() any          { return nil }
+
+// ---- helpers ----
+
+func minCfg() *config.Config {
+	return &config.Config{
+		Limits: config.Limits{
+			SFTPMaxReadBytes:  5 << 20,
+			SFTPMaxWriteBytes: 25 << 20,
+		},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u"},
+		},
+	}
+}
+
+func newTestOps(cfg *config.Config, get poolGetter, ffs *fakeFS) *ops {
+	return newOps(cfg, get, func(_ *ssh.Client) (sftpClientIface, error) {
+		return ffs, nil
+	})
+}
+
+// ---- Read tests ----
+
+func TestRead_Success(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/etc/hosts"] = []byte("127.0.0.1 localhost\n")
+
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	data, binary, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if binary {
+		t.Error("expected isBinary=false for text content")
+	}
+	if string(data) != "127.0.0.1 localhost\n" {
+		t.Errorf("Read() = %q, want exact content", data)
+	}
+}
+
+func TestRead_BinaryDetection(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/bin/null"] = []byte{0x00, 0x01, 0x02} // contains null byte
+
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	_, binary, err := o.Read(context.Background(), "h", "/bin/null", 0)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !binary {
+		t.Error("expected isBinary=true for content with null byte")
+	}
+}
+
+func TestRead_InvalidUTF8(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/bad.txt"] = []byte{0xff, 0xfe, 'x'} // invalid UTF-8
+
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	_, binary, err := o.Read(context.Background(), "h", "/bad.txt", 0)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !binary {
+		t.Error("expected isBinary=true for invalid UTF-8")
+	}
+}
+
+func TestRead_MaxBytesRespected(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/large.txt"] = bytes.Repeat([]byte("x"), 1000)
+
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	data, _, err := o.Read(context.Background(), "h", "/large.txt", 10)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(data) != 10 {
+		t.Errorf("Read() returned %d bytes, want 10", len(data))
+	}
+}
+
+func TestRead_PoolError(t *testing.T) {
+	o := newTestOps(minCfg(), errPool(errors.New("dial failed")), newFakeFS())
+	_, _, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
+	if err == nil {
+		t.Fatal("expected pool error")
+	}
+}
+
+func TestRead_FileNotFound(t *testing.T) {
+	o := newTestOps(minCfg(), okPool(nil), newFakeFS())
+	_, _, err := o.Read(context.Background(), "h", "/no/such/file", 0)
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestRead_OpenError(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.openErr = errors.New("permission denied")
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	_, _, err := o.Read(context.Background(), "h", "/etc/shadow", 0)
+	if err == nil {
+		t.Fatal("expected open error")
+	}
+}
+
+// ---- Write tests ----
+
+func TestWrite_Success(t *testing.T) {
+	ffs := newFakeFS()
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+
+	err := o.Write(context.Background(), "h", "/tmp/out.txt", []byte("hello"), 0)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if string(ffs.files["/tmp/out.txt"]) != "hello" {
+		t.Errorf("file content = %q, want %q", ffs.files["/tmp/out.txt"], "hello")
+	}
+}
+
+func TestWrite_WithMode(t *testing.T) {
+	ffs := newFakeFS()
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+
+	err := o.Write(context.Background(), "h", "/tmp/script.sh", []byte("#!/bin/sh"), 0755)
+	if err != nil {
+		t.Fatalf("Write with mode: %v", err)
+	}
+}
+
+func TestWrite_ChmodError(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.chmodErr = errors.New("chmod failed")
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+
+	err := o.Write(context.Background(), "h", "/tmp/f.sh", []byte("x"), 0755)
+	if err == nil {
+		t.Fatal("expected chmod error")
+	}
+}
+
+func TestWrite_SizeLimitExceeded(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.SFTPMaxWriteBytes = 4
+
+	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	err := o.Write(context.Background(), "h", "/tmp/big.bin", bytes.Repeat([]byte("x"), 5), 0)
+	if err == nil {
+		t.Fatal("expected size limit error")
+	}
+}
+
+func TestWrite_PoolError(t *testing.T) {
+	o := newTestOps(minCfg(), errPool(errors.New("no conn")), newFakeFS())
+	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0)
+	if err == nil {
+		t.Fatal("expected pool error")
+	}
+}
+
+func TestWrite_OpenFileError(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.writeErr = errors.New("read only filesystem")
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	err := o.Write(context.Background(), "h", "/etc/locked", []byte("x"), 0)
+	if err == nil {
+		t.Fatal("expected open error")
+	}
+}
+
+// ---- List tests ----
+
+func TestList_Success(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.dirs["/tmp"] = []fs.FileInfo{
+		fakeFileInfo{name: "file.txt", size: 42, mode: 0644},
+		fakeFileInfo{name: "subdir", isDir: true, mode: fs.ModeDir | 0755},
+	}
+
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	entries, err := o.List(context.Background(), "h", "/tmp")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("List() returned %d entries, want 2", len(entries))
+	}
+	if entries[0].Name != "file.txt" || entries[0].Size != 42 {
+		t.Errorf("unexpected first entry: %+v", entries[0])
+	}
+	if !entries[1].IsDir {
+		t.Error("expected second entry to be a directory")
+	}
+}
+
+func TestList_PoolError(t *testing.T) {
+	o := newTestOps(minCfg(), errPool(errors.New("dial failed")), newFakeFS())
+	_, err := o.List(context.Background(), "h", "/tmp")
+	if err == nil {
+		t.Fatal("expected pool error")
+	}
+}
+
+func TestList_ReadDirError(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.listErr = errors.New("directory not found")
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	_, err := o.List(context.Background(), "h", "/no/dir")
+	if err == nil {
+		t.Fatal("expected readdir error")
+	}
+}
+
+// ---- newClient error path ----
+
+func TestOpenSFTP_NewClientError(t *testing.T) {
+	cfg := minCfg()
+	badClientFactory := func(_ *ssh.Client) (sftpClientIface, error) {
+		return nil, errors.New("sftp init failed")
+	}
+	o := newOps(cfg, okPool(nil), badClientFactory)
+	_, _, err := o.Read(context.Background(), "h", "/f", 0)
+	if err == nil {
+		t.Fatal("expected newClient error to propagate")
+	}
+}

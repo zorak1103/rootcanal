@@ -5,15 +5,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
+	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
 	"gitlab.com/zorak1103/rootcanal/internal/version"
 )
 
-// New builds a configured *mcp.Server with all session tools registered.
+// New builds a configured *mcp.Server with all session and SFTP tools registered.
 //
-// onInitialized, if non-nil, is called once the MCP session handshake
-// completes and the *ServerSession is available. Use it to install an
-// mcp.NewLoggingHandler so that subsequent logs are routed to the client.
-func New(mgr session.Manager, onInitialized func(*mcp.ServerSession)) *mcp.Server {
+// onInitialized, if non-nil, is called once the MCP session handshake completes
+// so the caller can swap in an mcp.NewLoggingHandler to route logs to the client.
+func New(mgr session.Manager, ops sftpops.Ops, onInitialized func(*mcp.ServerSession)) *mcp.Server {
 	opts := &mcp.ServerOptions{}
 	if onInitialized != nil {
 		opts.InitializedHandler = func(_ context.Context, req *mcp.InitializedRequest) {
@@ -26,6 +26,7 @@ func New(mgr session.Manager, onInitialized func(*mcp.ServerSession)) *mcp.Serve
 		Version: version.Version,
 	}, opts)
 
+	// Session tools
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ssh_session_open",
 		Description: "Open a persistent interactive shell session on a pre-declared host. Returns a session_id for use with ssh_session_send and ssh_session_close.",
@@ -45,6 +46,22 @@ func New(mgr session.Manager, onInitialized func(*mcp.ServerSession)) *mcp.Serve
 		Name:        "ssh_session_list",
 		Description: "List all currently open shell sessions with their host and timing metadata.",
 	}, handleSessionList(mgr))
+
+	// SFTP tools
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "sftp_read",
+		Description: "Read a file from a remote host via SFTP. Returns UTF-8 text; binary files are base64-encoded with binary=true in the output.",
+	}, handleSFTPRead(ops))
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "sftp_write",
+		Description: "Write content to a file on a remote host via SFTP. Pass binary=true and base64-encode binary content. Use mode (octal string, e.g. '0644') to set permissions.",
+	}, handleSFTPWrite(ops))
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "sftp_list",
+		Description: "List the contents of a directory on a remote host via SFTP.",
+	}, handleSFTPList(ops))
 
 	return srv
 }

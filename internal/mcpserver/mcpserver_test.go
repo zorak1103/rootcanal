@@ -3,6 +3,8 @@ package mcpserver_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
+	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
 )
 
 // ---- fake Manager ----
@@ -33,11 +36,29 @@ func (f *fakeManager) Close(ctx context.Context, id string) error {
 func (f *fakeManager) List() []session.SessionInfo { return f.listFn() }
 func (f *fakeManager) Shutdown(_ context.Context) error { return nil }
 
+// ---- fake Ops ----
+
+type fakeOps struct {
+	readFn  func(ctx context.Context, host, path string, maxBytes int) ([]byte, bool, error)
+	writeFn func(ctx context.Context, host, path string, content []byte, mode fs.FileMode) error
+	listFn  func(ctx context.Context, host, path string) ([]sftpops.Entry, error)
+}
+
+func (f *fakeOps) Read(ctx context.Context, host, path string, maxBytes int) ([]byte, bool, error) {
+	return f.readFn(ctx, host, path, maxBytes)
+}
+func (f *fakeOps) Write(ctx context.Context, host, path string, content []byte, mode fs.FileMode) error {
+	return f.writeFn(ctx, host, path, content, mode)
+}
+func (f *fakeOps) List(ctx context.Context, host, path string) ([]sftpops.Entry, error) {
+	return f.listFn(ctx, host, path)
+}
+
 // ---- test helpers ----
 
-func newTestClient(t *testing.T, mgr session.Manager) *mcp.ClientSession {
+func newTestClient(t *testing.T, mgr session.Manager, ops sftpops.Ops) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, nil)
+	srv := mcpserver.New(mgr, ops, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -60,7 +81,7 @@ func TestToolsList(t *testing.T) {
 	mgr := &fakeManager{
 		listFn: func() []session.SessionInfo { return nil },
 	}
-	sess := newTestClient(t, mgr)
+	sess := newTestClient(t, mgr, nil)
 
 	result, err := sess.ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
@@ -87,7 +108,7 @@ func TestTool_SessionOpen_Success(t *testing.T) {
 			return "s_TEST01", nil
 		},
 	}
-	sess := newTestClient(t, mgr)
+	sess := newTestClient(t, mgr, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_open",
@@ -112,7 +133,7 @@ func TestTool_SessionOpen_Error(t *testing.T) {
 			return "", context.DeadlineExceeded
 		},
 	}
-	sess := newTestClient(t, mgr)
+	sess := newTestClient(t, mgr, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_open",
@@ -132,7 +153,7 @@ func TestTool_SessionSend(t *testing.T) {
 			return []byte("$ " + string(input)), false, false, nil
 		},
 	}
-	sess := newTestClient(t, mgr)
+	sess := newTestClient(t, mgr, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_send",
@@ -154,7 +175,7 @@ func TestTool_SessionClose(t *testing.T) {
 			return nil
 		},
 	}
-	sess := newTestClient(t, mgr)
+	sess := newTestClient(t, mgr, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_close",
@@ -180,7 +201,7 @@ func TestTool_SessionList(t *testing.T) {
 			}
 		},
 	}
-	sess := newTestClient(t, mgr)
+	sess := newTestClient(t, mgr, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_list",
@@ -198,11 +219,129 @@ func TestTool_SessionList(t *testing.T) {
 	}
 }
 
+// ---- SFTP tool tests ----
+
+func TestTool_SFTPRead_Text(t *testing.T) {
+	ops := &fakeOps{
+		readFn: func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) {
+			return []byte("hello world\n"), false, nil
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_read",
+		Arguments: map[string]any{"host": "h", "path": "/etc/hosts"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
+	}
+	raw, _ := json.Marshal(res.StructuredContent)
+	if !containsStr(raw, "hello world") {
+		t.Errorf("expected content in output: %s", raw)
+	}
+}
+
+func TestTool_SFTPRead_Error(t *testing.T) {
+	ops := &fakeOps{
+		readFn: func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) {
+			return nil, false, errors.New("file not found")
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_read",
+		Arguments: map[string]any{"host": "h", "path": "/missing"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true")
+	}
+}
+
+func TestTool_SFTPWrite_Success(t *testing.T) {
+	written := false
+	ops := &fakeOps{
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error {
+			written = true
+			return nil
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_write",
+		Arguments: map[string]any{"host": "h", "path": "/tmp/f.txt", "content": "data"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
+	}
+	if !written {
+		t.Error("expected write to be called")
+	}
+}
+
+func TestTool_SFTPWrite_InvalidMode(t *testing.T) {
+	ops := &fakeOps{
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error {
+			return nil
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_write",
+		Arguments: map[string]any{"host": "h", "path": "/tmp/f", "content": "x", "mode": "notoctal"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for invalid mode")
+	}
+}
+
+func TestTool_SFTPList_Success(t *testing.T) {
+	ops := &fakeOps{
+		listFn: func(_ context.Context, _, _ string) ([]sftpops.Entry, error) {
+			return []sftpops.Entry{
+				{Name: "readme.txt", Size: 100},
+				{Name: "src", IsDir: true},
+			}, nil
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "sftp_list",
+		Arguments: map[string]any{"host": "h", "path": "/home/user"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
+	}
+	raw, _ := json.Marshal(res.StructuredContent)
+	if !containsStr(raw, "readme.txt") {
+		t.Errorf("expected listing in output: %s", raw)
+	}
+}
+
 func TestOnInitialized_IsCalled(t *testing.T) {
 	called := make(chan struct{}, 1)
 	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
 
-	srv := mcpserver.New(mgr, func(_ *mcp.ServerSession) {
+	srv := mcpserver.New(mgr, nil, func(_ *mcp.ServerSession) {
 		called <- struct{}{}
 	})
 	t1, t2 := mcp.NewInMemoryTransports()
