@@ -4,12 +4,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
+	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
+	"gitlab.com/zorak1103/rootcanal/internal/session"
 	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
 	"gitlab.com/zorak1103/rootcanal/internal/version"
 )
@@ -17,7 +22,7 @@ import (
 func main() {
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	validateFlag := flag.Bool("validate-config", false, "validate config file and exit")
-	probeFlag := flag.String("probe", "", "dial the named host and print OK or error, then exit")
+	probeFlag := flag.String("probe", "", "dial the named host and exit")
 	configPath := flag.String("config", defaultConfigPath(), "path to config file")
 	flag.Parse()
 
@@ -26,22 +31,18 @@ func main() {
 		return
 	}
 
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
 	if *validateFlag {
-		cfg, err := config.Load(*configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-			os.Exit(1)
-		}
 		fmt.Printf("OK: %d host(s) defined\n", len(cfg.Hosts))
 		return
 	}
 
 	if *probeFlag != "" {
-		cfg, err := config.Load(*configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-			os.Exit(1)
-		}
 		h, ok := cfg.Hosts[*probeFlag]
 		if !ok {
 			fmt.Fprintf(os.Stderr, "probe: host %q not found in config\n", *probeFlag)
@@ -59,8 +60,27 @@ func main() {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "rootcanal: MCP server not yet implemented — see upcoming milestones")
-	os.Exit(1)
+	// Run as MCP server.
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	pool := hostpool.New(cfg, sshconn.ProdDialer{})
+	mgr := session.NewManager(cfg, pool, log)
+
+	srv := mcpserver.New(mgr)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	log.Info("rootcanal MCP server starting", "version", version.Version, "hosts", len(cfg.Hosts))
+
+	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil {
+		log.Error("server exited with error", "err", err)
+	}
+
+	log.Info("shutting down")
+	if err := mgr.Shutdown(context.Background()); err != nil {
+		log.Error("shutdown error", "err", err)
+	}
+	pool.Close()
 }
 
 func defaultConfigPath() string {
