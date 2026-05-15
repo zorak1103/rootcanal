@@ -34,15 +34,15 @@ MCP client ──stdio──▶ mcpserver ──▶ session.Manager ──▶ ho
 
 **`cmd/rootcanal/main.go`** — entry point. Parses CLI flags (`-config`, `-validate-config`, `-probe`, `-version`), wires all components, starts the MCP server over stdio. Also handles the log-handler swap: before MCP handshake logs go to stderr; after handshake they route through `mcp.NewLoggingHandler` to the client.
 
-**`internal/config`** — YAML config loading (`config.Load`), `${ENV_VAR}` interpolation, validation. Passwords and passphrases must come from env vars, never from the config file.
+**`internal/config`** — YAML config loading (`config.Load`), `${ENV_VAR}` interpolation, validation. Passwords and passphrases must come from env vars, never from the config file. `Host` carries `sftp_enabled` and `sftp_allowed_prefixes`; both are validated at load time.
 
 **`internal/sshconn`** — SSH dialing and auth. `Dialer` is an interface; `ProdDialer` is the real impl. Auth strategies: `key` (private key, optional passphrase from env), `agent` (SSH_AUTH_SOCK on Unix, named pipe on Windows), `password` (env var). Host-key verification is always strict (`known_hosts`-based). Platform-specific agent code is split into `agent_unix.go` / `agent_windows.go`.
 
 **`internal/hostpool`** — ref-counted `*ssh.Client` pool. One TCP connection per host, shared across concurrent sessions. Pool entries close automatically after 30 s of zero references. `Get` returns a client + release func; callers must invoke release when done.
 
-**`internal/session`** — PTY-based persistent shell sessions. `Manager` interface exposes `Open / Send / Close / List / Shutdown`. Each session holds a ring buffer (`ringbuf.go`) for output. `Send` writes to stdin, then waits for a 50 ms quiescence gap (or timeout) before draining the buffer and returning output. A background GC goroutine closes idle or aged-out sessions.
+**`internal/session`** — PTY-based persistent shell sessions. `Manager` interface exposes `Open / Send / Close / List / Shutdown`. Each session holds a ring buffer (`ringbuf.go`) for output. `Send` writes to stdin, then waits for a 50 ms quiescence gap (or timeout) before draining the buffer and returning output. `Open` atomically reserves a session slot (incrementing a `pending` counter and `perHost` under `m.mu`) before dialing, so `MaxSessionsTotal` and `MaxSessionsPerHost` cannot be exceeded by concurrent calls. A background GC goroutine closes idle or aged-out sessions.
 
-**`internal/sftpops`** — SFTP read/write/list on top of `hostpool`. `Ops` interface wraps the three operations; size limits for read/write are enforced from config.
+**`internal/sftpops`** — SFTP read/write/list on top of `hostpool`. `Ops` interface wraps the three operations. Every call is gated by `validateSFTPPath`: checks `sftp_enabled` on the host, applies `path.Clean` and rejects non-absolute results, then enforces `sftp_allowed_prefixes` (empty list denies all paths; `["/"]` allows any absolute path). Size limits for read/write are enforced from config.
 
 **`internal/mcpserver`** — registers the seven MCP tools (`ssh_session_open`, `ssh_session_send`, `ssh_session_close`, `ssh_session_list`, `sftp_read`, `sftp_write`, `sftp_list`) against `session.Manager` and `sftpops.Ops`. Tool handler files: `tools_session.go`, `tools_sftp.go`.
 

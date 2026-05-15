@@ -42,6 +42,8 @@ The config `limits` section enforces:
 | `sftp_max_read_bytes` | Caps memory allocated per `sftp_read` call |
 | `sftp_max_write_bytes` | Prevents the LLM writing arbitrarily large files |
 
+Both `max_sessions_total` and `max_sessions_per_host` are enforced atomically: the limit check and the slot reservation happen under the same mutex, before the SSH dial begins. Concurrent `ssh_session_open` calls cannot collectively bypass the cap even when the dial takes hundreds of milliseconds.
+
 The idle GC (`default_idle_timeout`, `max_session_age`) reclaims resources from abandoned sessions without operator intervention.
 
 ### 5. Bounded output buffer
@@ -64,11 +66,37 @@ rootcanal enforces this at two levels:
 
 No `fmt.Println` or `os.Stdout` write exists outside `cmd/rootcanal/main.go`, where they are gated on flags (`-version`, `-validate-config`, `-probe`) that exit before the MCP transport is started.
 
-### 8. SFTP path traversal
+### 8. SFTP access control
 
-rootcanal does not restrict which paths the LLM can access via SFTP. The rationale: a human operator who adds a host to the config has already made a decision to grant that user's full filesystem access to the LLM. Implementing a chroot or path allowlist would give a false sense of security while not matching the mental model — the operator chose to expose the host.
+SFTP is disabled per-host by default and requires three explicit operator decisions before the LLM can read or write any file.
 
-If you want to restrict SFTP access to a subtree, configure the SSH server itself (e.g. `ChrootDirectory` in `sshd_config`, or use an SFTP-only user).
+**Layer 1 — per-host opt-in (`sftp_enabled`)**
+
+Each host in the config must carry `sftp_enabled: true` before any SFTP tool call is accepted. Hosts without this field (or with `sftp_enabled: false`) return a structured "SFTP not enabled" error to the LLM regardless of what path is requested.
+
+**Layer 2 — path normalisation and absolute-path enforcement**
+
+Every LLM-supplied path is passed through `path.Clean` (Unix semantics, independent of the OS rootcanal runs on) before being forwarded to the remote SFTP server. The cleaned path must be absolute (start with `/`). Relative paths and traversal sequences such as `../` are rejected with a structured error.
+
+**Layer 3 — per-host path allowlist (`sftp_allowed_prefixes`)**
+
+`sftp_allowed_prefixes` is a required list of absolute Unix path prefixes. The cleaned path must equal one of the prefixes or be a direct descendant of it. An empty list (or an absent field) denies **all** paths — even when `sftp_enabled: true`. This is intentional: requiring the operator to enumerate allowed paths prevents an accidentally broad grant.
+
+```yaml
+hosts:
+  prod-web:
+    sftp_enabled: true
+    sftp_allowed_prefixes:
+      - /srv/app        # LLM can read/write anything under /srv/app
+      - /var/log/nginx  # and under /var/log/nginx
+    # /etc/passwd, /root/.ssh/authorized_keys, etc. are rejected
+```
+
+The prefix check uses an exact separator boundary: prefix `/srv/app` matches `/srv/app/config.json` and `/srv/app` itself, but not `/srv/apple/secret`.
+
+To grant access to the entire remote filesystem, set `sftp_allowed_prefixes: ["/"]`. This is a deliberate escape hatch that must be written explicitly.
+
+Server-side controls (e.g. `ChrootDirectory` in `sshd_config`) remain valid defence-in-depth and are not replaced by the above — they are complementary.
 
 ### 9. Agent auth security
 

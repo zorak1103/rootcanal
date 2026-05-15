@@ -22,9 +22,9 @@ MCP client ──(stdio MCP)──▶ rootcanal ──(SSH sessions)──▶ re
 | `ssh_session_send` | Write to the shell's stdin, return stdout/stderr output |
 | `ssh_session_close` | Close the session and release resources |
 | `ssh_session_list` | List open sessions with timing metadata |
-| `sftp_read` | Read a remote file (UTF-8 or base64 for binary) |
-| `sftp_write` | Write a remote file (base64 accepted for binary) |
-| `sftp_list` | List a remote directory |
+| `sftp_read` | Read a remote file (UTF-8 or base64 for binary) — requires `sftp_enabled: true` on the host |
+| `sftp_write` | Write a remote file (base64 accepted for binary) — requires `sftp_enabled: true` on the host |
+| `sftp_list` | List a remote directory — requires `sftp_enabled: true` on the host |
 
 ## Installation
 
@@ -72,6 +72,11 @@ hosts:
       type: key
       key_path: ~/.ssh/id_ed25519
       passphrase_env: ROOTCANAL_PROD_PASSPHRASE   # optional
+    # SFTP is disabled by default. Enable it and restrict paths explicitly.
+    sftp_enabled: true
+    sftp_allowed_prefixes:
+      - /srv/app
+      - /var/log/nginx
 
   staging:
     address: staging.example.com:22
@@ -79,6 +84,7 @@ hosts:
     known_hosts: ~/.ssh/known_hosts
     auth:
       type: agent   # uses SSH_AUTH_SOCK (Linux/macOS) or OpenSSH agent (Windows)
+    # No sftp_enabled → all sftp_* tool calls on this host are rejected.
 
   legacy:
     address: 10.0.0.7:2222
@@ -170,6 +176,25 @@ limits:
   sftp_max_read_bytes:   5242880 # 5 MiB per sftp_read call
   sftp_max_write_bytes: 26214400 # 25 MiB per sftp_write call
 ```
+
+## SFTP access control
+
+SFTP access is **disabled by default** and controlled by two per-host config fields:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `sftp_enabled` | bool | `false` | Must be `true` for any SFTP tool call to succeed on this host |
+| `sftp_allowed_prefixes` | list of strings | `[]` | Absolute Unix paths the LLM may access. Empty list denies all paths. |
+
+Three validation layers are applied to every `sftp_read`, `sftp_write`, and `sftp_list` call:
+
+1. **Host opt-in** — the host must have `sftp_enabled: true`, otherwise the call is rejected immediately.
+2. **Path normalisation** — `path.Clean` is applied and the result must be an absolute Unix path (starts with `/`). Traversal sequences such as `../` are rejected after cleaning.
+3. **Allowlist check** — the cleaned path must equal one of the configured prefixes or be a descendant of it. A prefix of `/srv/app` matches `/srv/app/config.json` but not `/srv/apple/secret`.
+
+**Explicit "allow all" escape hatch:** set `sftp_allowed_prefixes: ["/"]` to permit any absolute path — this must be written deliberately; it does not happen by default.
+
+Hosts without `sftp_enabled: true` have all `sftp_*` calls rejected, even if SFTP credentials would otherwise permit access.
 
 ## Known limitations
 
