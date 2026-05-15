@@ -1,5 +1,6 @@
 /rootcanal
 /rootcanal.exe
+/.go/
 /dist/
 /coverage.out
 /coverage.xml
