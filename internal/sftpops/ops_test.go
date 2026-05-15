@@ -573,11 +573,12 @@ func TestOps_SFTPIntegration(t *testing.T) {
 		},
 		Hosts: map[string]config.Host{
 			"sftp-test": {
-				Address:     addr,
-				User:        "u",
-				KnownHosts:  khPath,
-				Auth:        config.Auth{Type: "password", PasswordEnv: "TEST_SFTP_INT_PASS"},
-				SFTPEnabled: true,
+				Address:             addr,
+				User:                "u",
+				KnownHosts:          khPath,
+				Auth:                config.Auth{Type: "password", PasswordEnv: "TEST_SFTP_INT_PASS"},
+				SFTPEnabled:         true,
+				SFTPAllowedPrefixes: []string{"/"},
 			},
 		},
 	}
