@@ -177,6 +177,25 @@ limits:
 - **No port forwarding** in v1.0.0.
 - **PuTTY/Pageant not supported** on Windows — use OpenSSH for Windows agent.
 
+## sudo and privilege escalation
+
+rootcanal supports `sudo` on remote hosts through its PTY-based persistent sessions. The LLM sends `sudo <command>` via `ssh_session_send`, receives the password prompt in the output, and can respond with the password in a follow-up call.
+
+> **⚠️ Security warning:** Never pass a `sudo` password to the LLM as prompt context or conversation input. The password would travel to the LLM provider's infrastructure in plaintext, could appear in conversation logs or model responses, and is outside your control once sent.
+
+**Recommended approach: `NOPASSWD` for specific commands only**
+
+Configure sudoers to grant the SSH user passwordless access to exactly the commands that are needed — and nothing more:
+
+```
+# /etc/sudoers.d/rootcanal  (always edit with visudo -f)
+deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart myapp, /usr/bin/apt-get update
+```
+
+Do **not** use `NOPASSWD: ALL`. Restrict to the minimum set of commands the LLM actually needs. This is consistent with rootcanal's overall security model: boundaries are enforced by the operator at the system level, not by the LLM.
+
+If a password prompt appears and no password is provided, the session blocks until `default_send_timeout_ms` elapses and returns the prompt text — the LLM can detect this and surface it to the user.
+
 ## Development
 
 ```sh
