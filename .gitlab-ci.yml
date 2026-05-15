@@ -1,4 +1,5 @@
 stages:
+  - maintenance
   - verify
   - test
   - build
@@ -24,7 +25,7 @@ lint:
   stage: verify
   script:
     - go vet ./...
-    - go install honnef.co/go/tools/cmd/staticcheck@latest
+    - go install honnef.co/go/tools/cmd/staticcheck@v0.5.1
     - staticcheck ./...
 
 test:
@@ -69,6 +70,27 @@ release:
     paths:
       - dist/
     expire_in: 4 weeks
+
+renovate:
+  stage: maintenance
+  image:
+    name: renovate/renovate:40
+    entrypoint: [""]
+  variables:
+    LOG_LEVEL: info
+    RENOVATE_PLATFORM: gitlab
+    RENOVATE_ENDPOINT: "https://gitlab.com/api/v4/"
+    RENOVATE_AUTODISCOVER: "false"
+    RENOVATE_REPOSITORIES: "zorak1103/rootcanal"
+  before_script: []
+  cache: {}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $RENOVATE_DRY_RUN == null'
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $RENOVATE_DRY_RUN == "true"'
+      variables:
+        LOG_LEVEL: debug
+  script:
+    - renovate
 
 # macOS and Windows runners: add parallel jobs here once runners are configured.
 # build:macos:

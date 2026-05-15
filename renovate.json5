@@ -1,0 +1,67 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  extends: [
+    "config:recommended",     // PR descriptions, grouping, lockfile maintenance
+    ":dependencyDashboard",   // GitLab issue as central Renovate status tracker
+    ":semanticCommits",       // commit prefixes: fix(deps): / chore(deps):
+    ":timezone(Europe/Berlin)",
+  ],
+
+  // Renovate runs on CI schedule (03:00 UTC daily), but only opens/updates MRs in this window:
+  schedule: ["after 2am and before 7am every weekday", "every weekend"],
+
+  // GitLab-specific
+  platformAutomerge: true,
+  gitLabIgnoreApprovals: true, // no required-approvers configured on this project
+
+  packageRules: [
+    // Patch + digest updates: auto-merge after green pipeline ("Mittel" policy)
+    {
+      matchUpdateTypes: ["patch", "digest", "pin", "lockFileMaintenance"],
+      automerge: true,
+      automergeType: "pr",
+      platformAutomerge: true,
+    },
+    // Minor + major: open MR, require manual review
+    {
+      matchUpdateTypes: ["minor", "major"],
+      automerge: false,
+    },
+    // Go modules: run `go mod tidy` + fix import paths after each update
+    {
+      matchManagers: ["gomod"],
+      postUpdateOptions: ["gomodTidy", "gomodUpdateImportPaths"],
+    },
+    // Group Go toolchain updates separately from library bumps
+    {
+      matchDepNames: ["go"],
+      matchManagers: ["gomod"],
+      groupName: "go toolchain",
+    },
+  ],
+
+  customManagers: [
+    // Track staticcheck (and any future tool) installed via `go install pkg@vX.Y.Z`
+    // Applies to both Taskfile.yml and .gitlab-ci.yml
+    {
+      customType: "regex",
+      fileMatch: ["(^|/)Taskfile\\.ya?ml$", "(^|/)\\.gitlab-ci\\.yml$"],
+      matchStrings: [
+        "go install (?<depName>\\S+?)@(?<currentValue>v\\d+\\.\\d+\\.\\d+)",
+      ],
+      datasourceTemplate: "go",
+    },
+    // Track the Go version pinned in GO_VERSION: "1.xx" in .gitlab-ci.yml
+    {
+      customType: "regex",
+      fileMatch: ["(^|/)\\.gitlab-ci\\.yml$"],
+      matchStrings: [
+        "GO_VERSION:\\s*\"(?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)\"",
+      ],
+      depNameTemplate: "golang",
+      datasourceTemplate: "docker",
+      versioningTemplate: "docker",
+    },
+  ],
+}
