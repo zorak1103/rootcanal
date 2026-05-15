@@ -58,7 +58,6 @@ release:
     name: goreleaser/goreleaser:latest
     entrypoint: ['']
   variables:
-    GITLAB_TOKEN: $RELEASE_TOKEN
     GIT_DEPTH: 0
     GOTOOLCHAIN: auto
   rules:
