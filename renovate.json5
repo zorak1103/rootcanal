@@ -41,17 +41,8 @@
     },
   ],
 
+  // staticcheck is tracked via `tool` directive in go.mod — handled by the gomod manager above.
   customManagers: [
-    // Track staticcheck (and any future tool) installed via `go install pkg@vX.Y.Z`
-    // Applies to both Taskfile.yml and .gitlab-ci.yml
-    {
-      customType: "regex",
-      fileMatch: ["(^|/)Taskfile\\.ya?ml$", "(^|/)\\.gitlab-ci\\.yml$"],
-      matchStrings: [
-        "go install (?<depName>\\S+?)@(?<currentValue>v\\d+\\.\\d+\\.\\d+)",
-      ],
-      datasourceTemplate: "go",
-    },
     // Track the Go version pinned in GO_VERSION: "1.xx" in .gitlab-ci.yml
     {
       customType: "regex",

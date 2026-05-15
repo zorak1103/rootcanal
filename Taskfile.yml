@@ -39,10 +39,10 @@ tasks:
       - go run ./tools/covercheck -min={{.MIN_COVERAGE}} coverage.out
 
   lint:
-    desc: Run go vet and staticcheck (install staticcheck once with go install honnef.co/go/tools/cmd/staticcheck@latest)
+    desc: Run go vet and staticcheck
     cmds:
       - go vet ./...
-      - staticcheck ./...
+      - go tool staticcheck ./...
 
   tidy:
     desc: Run go mod tidy
