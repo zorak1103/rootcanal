@@ -40,6 +40,29 @@ Restart Claude Desktop after saving. The seven rootcanal tools appear in the too
 claude mcp add rootcanal -- rootcanal -config ~/.config/rootcanal/config.yaml
 ```
 
+## Claude Code skill
+
+If you use Claude Code as your MCP client, a companion skill is bundled with rootcanal under
+`.claude/skills/rootcanal-ssh/`. It teaches Claude the full rootcanal tool API, output-framing
+quirks, SFTP access control, and error-handling patterns so you don't have to explain them
+each session.
+
+Install the skill once into your user-level Claude Code config:
+
+```sh
+# Linux / macOS
+cp -r .claude/skills/rootcanal-ssh ~/.claude/skills/
+
+# Windows (PowerShell)
+Copy-Item -Recurse .claude\skills\rootcanal-ssh $env:USERPROFILE\.claude\skills\
+```
+
+Or, if you want the skill available only in a specific project that also uses rootcanal, copy
+it into that project's `.claude/skills/` directory instead.
+
+Reload Claude Code after copying. Claude picks up the skill automatically for any session
+where rootcanal is configured as an MCP server.
+
 ## Verifying the connection
 
 Ask the LLM:

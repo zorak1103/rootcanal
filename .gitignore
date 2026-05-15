@@ -5,7 +5,8 @@
 /coverage.xml
 *.test
 .task/
-.claude/
+.claude/*
+!.claude/skills
 CLAUDE.local.md
 /audit/
 /TODO/

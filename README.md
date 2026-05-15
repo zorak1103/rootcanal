@@ -149,6 +149,11 @@ For a smoke test, ask Claude:
 
 Claude will call `ssh_session_open`, then `ssh_session_send("uname -a\n")`, then `ssh_session_close`.
 
+For Claude Code users, a companion skill is bundled under `.claude/skills/rootcanal-ssh/`.
+Install it once to give Claude deep knowledge of all rootcanal tools, error messages, and SFTP
+workflows without repeating context each session. See [docs/mcp-client-setup.md](docs/mcp-client-setup.md)
+for installation instructions.
+
 ## SSH agent on Windows
 
 rootcanal connects to the **OpenSSH for Windows** agent via its named pipe. Enable it once:
