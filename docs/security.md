@@ -4,17 +4,17 @@ This document describes the security boundaries, threat model, and design decisi
 
 ## Threat model
 
-The principal threat is: **a confused or jailbroken LLM sends tool arguments that cause rootcanal to do something the operator did not intend.**
+The principal threat is: a confused or jailbroken LLM sends tool arguments that cause rootcanal to do something the operator did not intend.
 
-rootcanal is explicitly not designed to resist a malicious *operator* (the person who writes the config file). If you add a host to the config, you are granting full filesystem and shell access at that host's user level. The security model protects against unintended LLM behaviour, not against a hostile operator.
+rootcanal is not designed to resist a malicious *operator* (the person who writes the config file). If you add a host to the config, you are granting full filesystem and shell access at that host's user level. The security model protects against unintended LLM behaviour. A hostile operator is out of scope.
 
 ## Security boundaries
 
-### 1. Host allowlist (most important)
+### 1. Host allowlist
 
-The LLM passes a host **name** (e.g. `"prod-web"`) to every tool. rootcanal looks up the name in the config and uses the stored address; the LLM never supplies an IP address, port, or hostname. This single constraint eliminates the most dangerous class of attack: the LLM being convinced to connect to an arbitrary endpoint.
+The LLM passes a host **name** (e.g. `"prod-web"`) to every tool. rootcanal looks up the name in the config and uses the stored address; the LLM has no way to supply a raw network address or port. This removes a broad class of misuse: the LLM being convinced to connect to an arbitrary endpoint.
 
-An unknown host name always returns a tool error visible to the LLM, not a protocol error that could crash the session.
+An unknown host name returns a structured tool error visible to the LLM.
 
 ### 2. Strict host-key verification
 
@@ -23,13 +23,13 @@ Every host must have a `known_hosts` entry. rootcanal uses `golang.org/x/crypto/
 - **Host key mismatch**: the server presented a key that does not match the stored entry. rootcanal refuses to connect and returns a structured error. This detects MITM attacks or key rotation that was not acknowledged by the operator.
 - **Host not in known_hosts**: the host's key has never been stored. rootcanal refuses to connect. There is no "trust on first use" (TOFU) mode.
 
-`InsecureIgnoreHostKey` is not exposed as an option, not even behind a flag.
+`InsecureIgnoreHostKey` is not exposed as an option.
 
 ### 3. No plaintext secrets in config
 
 The config schema has `password_env` and `passphrase_env` fields (environment variable *names*), not `password` or `passphrase` fields (values). The YAML decoder is configured with `KnownFields(true)` so any attempt to add a `password: secret` key is rejected at parse time with an explicit error.
 
-**Future enhancement**: OS keyring (`go-keyring`) support — Windows Credential Manager, macOS Keychain, or Secret Service on Linux — is planned for v1.1. The config shape is already reserved as `password_keyring: rootcanal/<host>` to avoid breaking changes.
+OS keyring (`go-keyring`) support is planned for v1.1, with backends for Windows Credential Manager, macOS Keychain and Linux Secret Service. The config shape is already reserved as `password_keyring: rootcanal/<host>` to avoid breaking changes.
 
 ### 4. Resource caps
 
@@ -46,7 +46,7 @@ The idle GC (`default_idle_timeout`, `max_session_age`) reclaims resources from 
 
 ### 5. Bounded output buffer
 
-Each session has a ring buffer (`output_buffer_bytes`, default 1 MiB). If the remote shell produces output faster than it is consumed, oldest bytes are overwritten and the `truncated: true` flag is set in the `ssh_session_send` response so the LLM knows output was lost. There is no unbounded accumulation.
+Each session has a ring buffer (`output_buffer_bytes`, default 1 MiB). If the remote shell produces output faster than it is consumed, oldest bytes are overwritten and the `truncated: true` flag is set in the `ssh_session_send` response so the LLM knows output was lost.
 
 ### 6. UTF-8 enforcement
 
@@ -60,7 +60,7 @@ rootcanal uses the stdio MCP transport. The MCP client reads **stdout** and writ
 
 rootcanal enforces this at two levels:
 - All logging before the MCP session is established goes to **stderr**.
-- Once the session handshake completes, logging is routed through `mcp.NewLoggingHandler` which sends `notifications/message` events to the client — never to stdout or stderr.
+- Once the session handshake completes, logging is routed through `mcp.NewLoggingHandler` which sends `notifications/message` events to the client.
 
 No `fmt.Println` or `os.Stdout` write exists outside `cmd/rootcanal/main.go`, where they are gated on flags (`-version`, `-validate-config`, `-probe`) that exit before the MCP transport is started.
 
@@ -76,13 +76,13 @@ On Linux/macOS, rootcanal dials `$SSH_AUTH_SOCK`. On Windows, it dials the OpenS
 
 PuTTY/Pageant use a different protocol and are not supported in v1.0.0. Support would require a separate implementation of the Pageant protocol.
 
-## What rootcanal does NOT protect against
+## What rootcanal does not protect against
 
-- A malicious config file — the operator has full control.
-- An operator who writes keys with no passphrase to disk — that is an OS-level concern.
-- Network-level attacks other than host-key mismatch (e.g. traffic monitoring) — use the SSH transport's encryption, which is always on.
-- Privilege escalation on the remote host — rootcanal authenticates as a specific user; what that user can do is a matter of remote host configuration.
-- A compromised LLM that the operator deliberately gave unrestricted tool access to — rootcanal is a tool boundary, not an audit system.
+- A malicious config file: the operator has full control.
+- An operator who writes keys with no passphrase to disk: that is an OS-level concern.
+- Network-level attacks other than host-key mismatch (e.g. traffic monitoring): use the SSH transport's encryption, which is always on.
+- Privilege escalation on the remote host: rootcanal authenticates as a specific user; what that user can do is a matter of remote host configuration.
+- A compromised LLM with operator-granted unrestricted tool access: rootcanal is a tool boundary; auditing is the operator's responsibility.
 
 ## Reporting security issues
 

@@ -6,3 +6,6 @@
 *.test
 .task/
 .claude/
+CLAUDE.local.md
+/audit/
+/TODO/

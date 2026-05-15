@@ -8,10 +8,10 @@ Claude Desktop ──(stdio MCP)──▶ rootcanal ──(SSH)──▶ remote 
 
 ## Why rootcanal?
 
-- **Pre-declared hosts only** — the LLM references hosts by name (e.g. `"prod-web"`), never by raw IP. It can only reach what you have explicitly listed in the config.
-- **Persistent shell sessions** — `ssh_session_send` keeps the shell alive across calls, so the LLM can run `sudo`, interact with a REPL, or chain multi-step commands naturally.
-- **Strict host-key verification** — `known_hosts`-based, no `InsecureIgnoreHostKey` anywhere, ever.
-- **No plaintext secrets** — passwords and passphrases come from environment variables, never from the config file.
+- Pre-declared hosts only: the LLM references hosts by name (e.g. `"prod-web"`). It can only reach what you have explicitly listed in the config.
+- Persistent shell sessions: `ssh_session_send` keeps the shell alive across calls, so the LLM can run `sudo` or interact with a REPL across multiple commands.
+- Strict host-key verification: `known_hosts`-based; `InsecureIgnoreHostKey` is not exposed.
+- No plaintext secrets: passwords and passphrases come from environment variables.
 
 ## Tools exposed
 
@@ -58,7 +58,7 @@ go build -o rootcanal ./cmd/rootcanal
 
 ## Configuration
 
-Create a config file — `~/.config/rootcanal/config.yaml` on Linux/macOS, `%APPDATA%\rootcanal\config.yaml` on Windows — and declare your hosts.
+Create a config file (`~/.config/rootcanal/config.yaml` on Linux/macOS, `%APPDATA%\rootcanal\config.yaml` on Windows) and declare your hosts.
 
 ```yaml
 # ~/.config/rootcanal/config.yaml
@@ -90,14 +90,14 @@ hosts:
 
 Annotated example with all options: [`examples/rootcanal.example.yaml`](examples/rootcanal.example.yaml).
 
-**Validate your config** without connecting to anything:
+Validate your config without connecting to anything:
 
 ```sh
 rootcanal -validate-config -config ~/.config/rootcanal/config.yaml
 # → OK: 3 host(s) defined
 ```
 
-**Test connectivity** to a single host:
+Test connectivity to a single host:
 
 ```sh
 rootcanal -probe prod-web -config ~/.config/rootcanal/config.yaml
@@ -136,7 +136,7 @@ Add rootcanal to your `claude_desktop_config.json`:
 
 Restart Claude Desktop after saving. The rootcanal tools appear in the tool list.
 
-**Quick smoke test** — ask Claude:
+For a smoke test, ask Claude:
 
 > *"Use rootcanal to open a session on `prod-web` and run `uname -a`."*
 
@@ -172,29 +172,29 @@ limits:
 
 ## Known limitations
 
-- **Output framing is heuristic.** `ssh_session_send` returns output received within a timeout after a 50 ms quiescence gap. It may split output across two calls for long-running commands; the LLM handles this gracefully by calling `send` with empty input to poll for more.
-- **No `ssh_exec` (single-shot exec).** Use `ssh_session_open` + `ssh_session_send` + `ssh_session_close` instead. This is intentional: the persistent session model handles `sudo` prompts, REPLs, and multi-step commands naturally.
-- **No port forwarding** in v1.0.0.
-- **PuTTY/Pageant not supported** on Windows — use OpenSSH for Windows agent.
+- Output framing is heuristic. `ssh_session_send` returns output received within a timeout after a 50 ms quiescence gap. It may split output across two calls for long-running commands; poll by calling `send` with empty input.
+- No `ssh_exec` (single-shot exec). Use `ssh_session_open` + `ssh_session_send` + `ssh_session_close` instead. The persistent session model handles `sudo` prompts and REPLs naturally.
+- No port forwarding in v1.0.0.
+- PuTTY/Pageant not supported on Windows: use OpenSSH for Windows agent.
 
 ## sudo and privilege escalation
 
 rootcanal supports `sudo` on remote hosts through its PTY-based persistent sessions. The LLM sends `sudo <command>` via `ssh_session_send`, receives the password prompt in the output, and can respond with the password in a follow-up call.
 
-> **⚠️ Security warning:** Never pass a `sudo` password to the LLM as prompt context or conversation input. The password would travel to the LLM provider's infrastructure in plaintext, could appear in conversation logs or model responses, and is outside your control once sent.
+> Security warning: never pass a `sudo` password to the LLM as prompt context or conversation input. The password would travel to the LLM provider's infrastructure in plaintext and may appear in conversation logs.
 
-**Recommended approach: `NOPASSWD` for specific commands only**
+### Recommended: `NOPASSWD` for specific commands only
 
-Configure sudoers to grant the SSH user passwordless access to exactly the commands that are needed — and nothing more:
+Configure sudoers to grant the SSH user passwordless access to exactly the commands that are needed:
 
 ```
 # /etc/sudoers.d/rootcanal  (always edit with visudo -f)
 deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart myapp, /usr/bin/apt-get update
 ```
 
-Do **not** use `NOPASSWD: ALL`. Restrict to the minimum set of commands the LLM actually needs. This is consistent with rootcanal's overall security model: boundaries are enforced by the operator at the system level, not by the LLM.
+Do **not** use `NOPASSWD: ALL`. Restrict to the minimum set of commands the LLM actually needs.
 
-If a password prompt appears and no password is provided, the session blocks until `default_send_timeout_ms` elapses and returns the prompt text — the LLM can detect this and surface it to the user.
+If a password prompt appears and no password is provided, the session blocks until `default_send_timeout_ms` elapses and returns the prompt text. The LLM can detect this and surface it to the user.
 
 ## Development
 
