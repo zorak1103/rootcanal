@@ -30,7 +30,7 @@ How dependency updates are automated in rootcanal.
    - Key: `RENOVATE_TOKEN`
    - Value: `<token from step 1>`
    - Type: Variable
-   - Flags: **Masked** ✔, Protected ✘, Expand variable reference ✘
+   - Flags: **Masked** ✔, **Protected** ✔, Expand variable reference ✘
 
 3. **Pipeline Schedule** — Build → Pipeline schedules → "New schedule"
    - Description: `Renovate (nightly)`
