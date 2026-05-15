@@ -47,7 +47,7 @@ type sftpClientIface interface {
 // realSFTPClient adapts *sftp.Client to sftpClientIface.
 type realSFTPClient struct{ *sftp.Client }
 
-func (r *realSFTPClient) Open(path string) (io.ReadCloser, error)       { return r.Client.Open(path) }
+func (r *realSFTPClient) Open(path string) (io.ReadCloser, error) { return r.Client.Open(path) }
 func (r *realSFTPClient) OpenFile(path string, f int) (io.WriteCloser, error) {
 	return r.Client.OpenFile(path, f)
 }

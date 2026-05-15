@@ -107,13 +107,13 @@ func errFactory(err error) newSessionFn {
 func minCfg() *config.Config {
 	return &config.Config{
 		Limits: config.Limits{
-			MaxSessionsTotal:    32,
-			MaxSessionsPerHost:  4,
-			DefaultIdleTimeout:  15 * time.Minute,
-			MaxSessionAge:       4 * time.Hour,
-			OutputBufferBytes:   4096,
+			MaxSessionsTotal:     32,
+			MaxSessionsPerHost:   4,
+			DefaultIdleTimeout:   15 * time.Minute,
+			MaxSessionAge:        4 * time.Hour,
+			OutputBufferBytes:    4096,
 			DefaultSendTimeoutMs: 2000,
-			MaxSendTimeoutMs:    30000,
+			MaxSendTimeoutMs:     30000,
 		},
 		Hosts: map[string]config.Host{
 			"h": {Address: "h:22", User: "u", KnownHosts: "system", Auth: config.Auth{Type: "agent"}},

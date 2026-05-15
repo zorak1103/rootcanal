@@ -36,8 +36,8 @@ type session struct {
 	openedAt    time.Time
 	done        chan struct{} // closed when remote shell exits
 
-	sendMu sync.Mutex // serialises Send calls
-	mu     sync.Mutex // guards: closed, lastUsedAt
+	sendMu     sync.Mutex // serialises Send calls
+	mu         sync.Mutex // guards: closed, lastUsedAt
 	closed     bool
 	lastUsedAt time.Time
 

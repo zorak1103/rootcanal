@@ -14,7 +14,7 @@ const (
 	defaultMaxSessionsPerHost = 4
 	defaultIdleTimeout        = 15 * time.Minute
 	defaultMaxSessionAge      = 4 * time.Hour
-	defaultOutputBufferBytes  = 1 << 20  // 1 MiB
+	defaultOutputBufferBytes  = 1 << 20 // 1 MiB
 	defaultDialTimeout        = 10 * time.Second
 	defaultSendTimeoutMs      = 2000
 	defaultMaxSendTimeoutMs   = 30000
@@ -30,16 +30,16 @@ type Config struct {
 
 // Limits holds global resource caps and timeouts.
 type Limits struct {
-	MaxSessionsTotal    int           `yaml:"max_sessions_total"`
-	MaxSessionsPerHost  int           `yaml:"max_sessions_per_host"`
-	DefaultIdleTimeout  time.Duration `yaml:"default_idle_timeout"`
-	MaxSessionAge       time.Duration `yaml:"max_session_age"`
-	OutputBufferBytes   int           `yaml:"output_buffer_bytes"`
-	DialTimeout         time.Duration `yaml:"dial_timeout"`
-	DefaultSendTimeoutMs int          `yaml:"default_send_timeout_ms"`
-	MaxSendTimeoutMs    int           `yaml:"max_send_timeout_ms"`
-	SFTPMaxReadBytes    int           `yaml:"sftp_max_read_bytes"`
-	SFTPMaxWriteBytes   int           `yaml:"sftp_max_write_bytes"`
+	MaxSessionsTotal     int           `yaml:"max_sessions_total"`
+	MaxSessionsPerHost   int           `yaml:"max_sessions_per_host"`
+	DefaultIdleTimeout   time.Duration `yaml:"default_idle_timeout"`
+	MaxSessionAge        time.Duration `yaml:"max_session_age"`
+	OutputBufferBytes    int           `yaml:"output_buffer_bytes"`
+	DialTimeout          time.Duration `yaml:"dial_timeout"`
+	DefaultSendTimeoutMs int           `yaml:"default_send_timeout_ms"`
+	MaxSendTimeoutMs     int           `yaml:"max_send_timeout_ms"`
+	SFTPMaxReadBytes     int           `yaml:"sftp_max_read_bytes"`
+	SFTPMaxWriteBytes    int           `yaml:"sftp_max_write_bytes"`
 }
 
 // Host is a pre-declared SSH target.

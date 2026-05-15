@@ -11,10 +11,10 @@ import (
 type ringBuf struct {
 	mu        sync.Mutex
 	data      []byte
-	start     int  // index of oldest valid byte
-	n         int  // number of valid bytes
+	start     int // index of oldest valid byte
+	n         int // number of valid bytes
 	cap       int
-	truncated bool        // sticky; cleared by Drain
+	truncated bool          // sticky; cleared by Drain
 	notify    chan struct{} // 1-buffered; signalled on every Write
 }
 

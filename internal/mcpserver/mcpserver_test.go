@@ -33,7 +33,7 @@ func (f *fakeManager) Send(ctx context.Context, id string, input []byte, timeout
 func (f *fakeManager) Close(ctx context.Context, id string) error {
 	return f.closeFn(ctx, id)
 }
-func (f *fakeManager) List() []session.SessionInfo { return f.listFn() }
+func (f *fakeManager) List() []session.SessionInfo      { return f.listFn() }
 func (f *fakeManager) Shutdown(_ context.Context) error { return nil }
 
 // ---- fake Ops ----
