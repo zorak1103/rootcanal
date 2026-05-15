@@ -3,7 +3,8 @@
 **rootcanal** is an SSH MCP server written in Go. It lets an MCP client (Claude Desktop, the Claude CLI, or any MCP host) open persistent shell sessions and perform SFTP file operations on a pre-declared set of remote hosts.
 
 ```
-MCP client ──(stdio MCP)──▶ rootcanal ──(SSH)──▶ remote hosts
+MCP client ──(stdio MCP)──▶ rootcanal ──(SSH sessions)──▶ remote hosts
+                                       └──(SFTP)──────────▶ remote hosts
 ```
 
 ## Why rootcanal?
