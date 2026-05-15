@@ -513,3 +513,109 @@ func TestExpandPath(t *testing.T) {
 		})
 	}
 }
+
+// ---- SFTP config validation tests ----
+
+func validHostCfg(t *testing.T) (kh string, keyPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	kh = filepath.Join(dir, "known_hosts")
+	keyPath = filepath.Join(dir, "id_ed25519")
+	_ = os.WriteFile(kh, []byte("kh"), 0600)
+	_ = os.WriteFile(keyPath, []byte("key"), 0600)
+	return kh, keyPath
+}
+
+func TestValidate_SFTPEnabled_NoPrefix(t *testing.T) {
+	kh, _ := validHostCfg(t)
+	cfg := &Config{Hosts: map[string]Host{
+		"h": {Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"}, SFTPEnabled: true},
+	}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+}
+
+func TestValidate_SFTPEnabled_WithCleanAbsolutePrefixes(t *testing.T) {
+	kh, _ := validHostCfg(t)
+	cfg := &Config{Hosts: map[string]Host{
+		"h": {
+			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
+			SFTPEnabled:         true,
+			SFTPAllowedPrefixes: []string{"/srv/app", "/var/log"},
+		},
+	}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+}
+
+func TestValidate_SFTPPrefix_RequiresSFTPEnabled(t *testing.T) {
+	kh, _ := validHostCfg(t)
+	cfg := &Config{Hosts: map[string]Host{
+		"h": {
+			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
+			SFTPEnabled:         false,
+			SFTPAllowedPrefixes: []string{"/srv/app"},
+		},
+	}}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected error: sftp_allowed_prefixes without sftp_enabled")
+	}
+}
+
+func TestValidate_SFTPPrefix_RelativeRejected(t *testing.T) {
+	kh, _ := validHostCfg(t)
+	cfg := &Config{Hosts: map[string]Host{
+		"h": {
+			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
+			SFTPEnabled:         true,
+			SFTPAllowedPrefixes: []string{"srv/app"},
+		},
+	}}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected error: relative prefix")
+	}
+}
+
+func TestValidate_SFTPPrefix_UncleanRejected(t *testing.T) {
+	kh, _ := validHostCfg(t)
+	cfg := &Config{Hosts: map[string]Host{
+		"h": {
+			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
+			SFTPEnabled:         true,
+			SFTPAllowedPrefixes: []string{"/srv/app/"},
+		},
+	}}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected error: unclean prefix (trailing slash)")
+	}
+}
+
+func TestLoad_SFTPFields_RoundTrip(t *testing.T) {
+	kh, _ := validHostCfg(t)
+	yaml := fmt.Sprintf(`
+hosts:
+  h:
+    address: h.example.com:22
+    user: u
+    known_hosts: %s
+    auth:
+      type: agent
+    sftp_enabled: true
+    sftp_allowed_prefixes:
+      - /srv/app
+      - /var/log
+`, kh)
+	cfg, err := Load(tempFile(t, "cfg.yaml", yaml))
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	h := cfg.Hosts["h"]
+	if !h.SFTPEnabled {
+		t.Error("SFTPEnabled should be true")
+	}
+	if len(h.SFTPAllowedPrefixes) != 2 || h.SFTPAllowedPrefixes[0] != "/srv/app" {
+		t.Errorf("SFTPAllowedPrefixes = %v, want [/srv/app /var/log]", h.SFTPAllowedPrefixes)
+	}
+}

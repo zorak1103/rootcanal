@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -485,5 +486,118 @@ func TestRingBuf_WaitForData_QuiesceReset(t *testing.T) {
 	got, _ := rb.Drain()
 	if !bytes.Contains(got, []byte("first")) || !bytes.Contains(got, []byte("second")) {
 		t.Errorf("expected both writes in output, got %q", got)
+	}
+}
+
+// ---- TOCTOU tests ----
+
+// slowFactory returns a factory that blocks until the returned gate channel is
+// closed, then creates a fresh fakeSession. This simulates the SSH dial latency
+// that makes the TOCTOU window exploitable.
+func slowFactory(gate <-chan struct{}) newSessionFn {
+	return func(_ context.Context, _ string) (sshSession, func(), error) {
+		<-gate
+		return newFakeSession(), func() {}, nil
+	}
+}
+
+func TestManager_Open_TOCTOU_GlobalCap(t *testing.T) {
+	const maxTotal = 3
+	cfg := minCfg()
+	cfg.Limits.MaxSessionsTotal = maxTotal
+	cfg.Limits.MaxSessionsPerHost = 20 // don't trigger per-host limit
+
+	gate := make(chan struct{})
+	m := newManager(cfg, slowFactory(gate), nil)
+	defer m.Shutdown(context.Background())
+
+	const concurrent = maxTotal + 3 // try to create 6 when cap is 3
+	var wg sync.WaitGroup
+	var successCount, failCount atomic.Int32
+	wg.Add(concurrent)
+	for range concurrent {
+		go func() {
+			defer wg.Done()
+			_, err := m.Open(context.Background(), "h")
+			if err == nil {
+				successCount.Add(1)
+			} else {
+				failCount.Add(1)
+			}
+		}()
+	}
+
+	// Give all goroutines time to pass (or fail at) the limit check.
+	time.Sleep(20 * time.Millisecond)
+	close(gate) // release the factory for all waiting goroutines
+	wg.Wait()
+
+	got := int(successCount.Load())
+	if got > maxTotal {
+		t.Errorf("global cap bypassed: %d sessions created, cap was %d", got, maxTotal)
+	}
+	if int(successCount.Load())+int(failCount.Load()) != concurrent {
+		t.Errorf("goroutine accounting mismatch: %d success + %d fail != %d total",
+			successCount.Load(), failCount.Load(), concurrent)
+	}
+}
+
+func TestManager_Open_TOCTOU_PerHostCap(t *testing.T) {
+	const maxPerHost = 2
+	cfg := minCfg()
+	cfg.Limits.MaxSessionsTotal = 20
+	cfg.Limits.MaxSessionsPerHost = maxPerHost
+
+	gate := make(chan struct{})
+	m := newManager(cfg, slowFactory(gate), nil)
+	defer m.Shutdown(context.Background())
+
+	const concurrent = maxPerHost + 3 // try to create 5 for cap=2
+	var wg sync.WaitGroup
+	var successCount atomic.Int32
+	wg.Add(concurrent)
+	for range concurrent {
+		go func() {
+			defer wg.Done()
+			_, err := m.Open(context.Background(), "h")
+			if err == nil {
+				successCount.Add(1)
+			}
+		}()
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	if got := int(successCount.Load()); got > maxPerHost {
+		t.Errorf("per-host cap bypassed: %d sessions for host, cap was %d", got, maxPerHost)
+	}
+}
+
+func TestManager_Open_FailureReleasesReservation(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.MaxSessionsTotal = 1
+
+	calls := 0
+	factory := func(_ context.Context, _ string) (sshSession, func(), error) {
+		calls++
+		if calls == 1 {
+			return nil, nil, errors.New("transient dial error")
+		}
+		return newFakeSession(), func() {}, nil
+	}
+
+	m := newManager(cfg, factory, nil)
+	defer m.Shutdown(context.Background())
+
+	_, err := m.Open(context.Background(), "h")
+	if err == nil {
+		t.Fatal("expected first Open to fail (factory error)")
+	}
+
+	_, err = m.Open(context.Background(), "h")
+	if err != nil {
+		t.Fatalf("second Open should succeed after reservation was rolled back: %v", err)
 	}
 }

@@ -78,6 +78,7 @@ type manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
 	perHost  map[string]int
+	pending  int // in-flight Open() calls that have reserved a slot but not yet registered
 	stopping bool
 
 	gcStop chan struct{}
@@ -89,18 +90,41 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 		return "", fmt.Errorf("unknown host %q", host)
 	}
 
-	m.mu.Lock()
-	total := len(m.sessions)
-	perHost := m.perHost[host]
-	m.mu.Unlock()
-
 	limits := m.cfg.Limits
-	if limits.MaxSessionsTotal > 0 && total >= limits.MaxSessionsTotal {
+
+	// Atomically reserve a session slot before calling the factory.
+	// Both checks happen under the same lock so no concurrent Open() can
+	// slip through the gap between check and increment.
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		return "", fmt.Errorf("manager is shutting down")
+	}
+	if limits.MaxSessionsTotal > 0 && len(m.sessions)+m.pending >= limits.MaxSessionsTotal {
+		m.mu.Unlock()
 		return "", fmt.Errorf("global session limit of %d reached", limits.MaxSessionsTotal)
 	}
-	if limits.MaxSessionsPerHost > 0 && perHost >= limits.MaxSessionsPerHost {
+	if limits.MaxSessionsPerHost > 0 && m.perHost[host] >= limits.MaxSessionsPerHost {
+		m.mu.Unlock()
 		return "", fmt.Errorf("host %q: per-host session limit of %d reached", host, limits.MaxSessionsPerHost)
 	}
+	m.pending++
+	m.perHost[host]++
+	m.mu.Unlock()
+
+	// On any failure path, roll back the reservation.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			m.mu.Lock()
+			m.pending--
+			m.perHost[host]--
+			if m.perHost[host] <= 0 {
+				delete(m.perHost, host)
+			}
+			m.mu.Unlock()
+		}
+	}()
 
 	sshSess, releasePool, err := m.factory(ctx, host)
 	if err != nil {
@@ -156,7 +180,8 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 		return "", fmt.Errorf("manager is shutting down")
 	}
 	m.sessions[id] = s
-	m.perHost[host]++
+	m.pending-- // reservation fulfilled; slot now counted in len(m.sessions)
+	handedOff = true
 	m.mu.Unlock()
 
 	// Launch Wait goroutine after registration so Shutdown cannot miss this session.

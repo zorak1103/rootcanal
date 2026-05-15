@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,7 +127,9 @@ func minCfg() *config.Config {
 			SFTPMaxWriteBytes: 25 << 20,
 		},
 		Hosts: map[string]config.Host{
-			"h": {Address: "h:22", User: "u"},
+			// SFTPAllowedPrefixes: ["/"] grants access to any absolute path.
+			// Tests that exercise specific path restrictions override this inline.
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/"}},
 		},
 	}
 }
@@ -348,6 +352,139 @@ func TestList_ReadDirError(t *testing.T) {
 	}
 }
 
+// ---- Path validation tests ----
+
+func TestValidateSFTPPath_SFTPDisabled(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts:  map[string]config.Host{"h": {Address: "h:22", User: "u", SFTPEnabled: false}},
+	}
+	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	_, _, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
+	if err == nil || !containsStr(err.Error(), "not enabled") {
+		t.Fatalf("expected SFTP-disabled error, got: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_RelativePath(t *testing.T) {
+	o := newTestOps(minCfg(), okPool(nil), newFakeFS())
+	_, _, err := o.Read(context.Background(), "h", "../etc/passwd", 0)
+	if err == nil || !containsStr(err.Error(), "must be absolute") {
+		t.Fatalf("expected absolute-path error, got: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_TraversalCleaned_ThenAllowlistRejected(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	// /srv/app/../etc/passwd cleans to /etc/passwd — outside the allowlist.
+	_, _, err := o.Read(context.Background(), "h", "/srv/app/../etc/passwd", 0)
+	if err == nil || !containsStr(err.Error(), "not under any allowed prefix") {
+		t.Fatalf("expected allowlist error after traversal cleaning, got: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_AllowlistMatch(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/srv/app/config.json"] = []byte(`{"ok":true}`)
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	o := newTestOps(cfg, okPool(nil), ffs)
+	_, _, err := o.Read(context.Background(), "h", "/srv/app/config.json", 0)
+	if err != nil {
+		t.Fatalf("unexpected error for path inside allowlist: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_AllowlistPrefixEdgeCase(t *testing.T) {
+	// /srv/apple must NOT match prefix /srv/app.
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	_, _, err := o.Read(context.Background(), "h", "/srv/apple/secret", 0)
+	if err == nil || !containsStr(err.Error(), "not under any allowed prefix") {
+		t.Fatalf("expected allowlist error for /srv/apple (edge case), got: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_AllowlistExactMatch(t *testing.T) {
+	// Path equal to the prefix itself is allowed (e.g. listing the prefix dir).
+	ffs := newFakeFS()
+	ffs.dirs["/srv/app"] = nil
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	o := newTestOps(cfg, okPool(nil), ffs)
+	_, err := o.List(context.Background(), "h", "/srv/app")
+	if err != nil {
+		t.Fatalf("unexpected error for path equal to prefix: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_EmptyAllowlist_DeniesAll(t *testing.T) {
+	// Empty or absent sftp_allowed_prefixes rejects every path.
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts:  map[string]config.Host{"h": {Address: "h:22", User: "u", SFTPEnabled: true}},
+	}
+	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	_, _, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
+	if err == nil || !containsStr(err.Error(), "not under any allowed prefix") {
+		t.Fatalf("expected allowlist error for empty prefix list, got: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_SlashPrefix_AllowsAnyAbsolute(t *testing.T) {
+	// "/" as a prefix is the explicit "allow all absolute paths" escape hatch.
+	ffs := newFakeFS()
+	ffs.files["/etc/hosts"] = []byte("127.0.0.1 localhost\n")
+	o := newTestOps(minCfg(), okPool(nil), ffs) // minCfg uses ["/"]
+	_, _, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
+	if err != nil {
+		t.Fatalf("unexpected error with prefix [\"/\"]: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_Write_Disabled(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts:  map[string]config.Host{"h": {Address: "h:22", User: "u", SFTPEnabled: false}},
+	}
+	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0)
+	if err == nil || !containsStr(err.Error(), "not enabled") {
+		t.Fatalf("expected SFTP-disabled error, got: %v", err)
+	}
+}
+
+func TestValidateSFTPPath_List_RelativePath(t *testing.T) {
+	o := newTestOps(minCfg(), okPool(nil), newFakeFS())
+	_, err := o.List(context.Background(), "h", "relative/dir")
+	if err == nil || !containsStr(err.Error(), "must be absolute") {
+		t.Fatalf("expected absolute-path error, got: %v", err)
+	}
+}
+
+func containsStr(s, sub string) bool {
+	return strings.Contains(s, sub)
+}
+
 // ---- SFTP integration test (covers defaultNewClient + realSFTPClient adapters) ----
 
 func startSFTPServer(t *testing.T) (addr, khPath string) {
@@ -422,6 +559,9 @@ func serveSFTPConn(conn net.Conn, cfg *ssh.ServerConfig) {
 }
 
 func TestOps_SFTPIntegration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration test uses OS temp paths; Unix path validation rejects Windows paths")
+	}
 	addr, khPath := startSFTPServer(t)
 	t.Setenv("TEST_SFTP_INT_PASS", "irrelevant")
 	dir := t.TempDir()
@@ -433,10 +573,11 @@ func TestOps_SFTPIntegration(t *testing.T) {
 		},
 		Hosts: map[string]config.Host{
 			"sftp-test": {
-				Address:    addr,
-				User:       "u",
-				KnownHosts: khPath,
-				Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_SFTP_INT_PASS"},
+				Address:     addr,
+				User:        "u",
+				KnownHosts:  khPath,
+				Auth:        config.Auth{Type: "password", PasswordEnv: "TEST_SFTP_INT_PASS"},
+				SFTPEnabled: true,
 			},
 		},
 	}

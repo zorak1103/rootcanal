@@ -34,6 +34,13 @@ hosts:
       key_path: ~/.ssh/id_ed25519
       # If the key is passphrase-protected, provide the env var name:
       passphrase_env: ROOTCANAL_PROD_WEB_PASSPHRASE   # optional
+    # SFTP access is disabled by default (sftp_enabled: false).
+    # When enabled, sftp_allowed_prefixes MUST be non-empty — an empty or absent
+    # list denies all paths. Use ["/"] only if you intentionally want no restriction.
+    sftp_enabled: true
+    sftp_allowed_prefixes:
+      - /srv/app                    # LLM can only read/write/list under /srv/app
+      - /var/log/nginx
 
   # --- SSH agent authentication ---
   staging-db:

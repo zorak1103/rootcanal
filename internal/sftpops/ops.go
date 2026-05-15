@@ -7,6 +7,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -79,6 +81,37 @@ func defaultNewClient(c *ssh.Client) (sftpClientIface, error) {
 	return &realSFTPClient{cl}, nil
 }
 
+// validateSFTPPath checks that SFTP is enabled for the host and that in is a
+// safe absolute Unix path. It returns the path.Clean form of in.
+func (o *ops) validateSFTPPath(host, in string) (string, error) {
+	h, ok := o.cfg.Hosts[host]
+	if !ok {
+		return "", fmt.Errorf("unknown host %q", host)
+	}
+	if !h.SFTPEnabled {
+		return "", fmt.Errorf("host %q: SFTP not enabled", host)
+	}
+	cleaned := path.Clean(in)
+	if !path.IsAbs(cleaned) {
+		return "", fmt.Errorf("path %q must be absolute", in)
+	}
+	if !pathMatchesAnyPrefix(cleaned, h.SFTPAllowedPrefixes) {
+		return "", fmt.Errorf("path %q is not under any allowed prefix", cleaned)
+	}
+	return cleaned, nil
+}
+
+// pathMatchesAnyPrefix reports whether p equals a prefix or lives under it.
+// "/" matches every absolute path. An empty prefixes slice matches nothing.
+func pathMatchesAnyPrefix(p string, prefixes []string) bool {
+	for _, pfx := range prefixes {
+		if pfx == "/" || p == pfx || strings.HasPrefix(p, pfx+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // openSFTP is the shared dial-and-open helper used by all three operations.
 func (o *ops) openSFTP(ctx context.Context, host string) (sftpClientIface, func(), error) {
 	client, release, err := o.get(ctx, host)
@@ -98,15 +131,20 @@ func (o *ops) openSFTP(ctx context.Context, host string) (sftpClientIface, func(
 }
 
 func (o *ops) Read(ctx context.Context, host, path string, maxBytes int) ([]byte, bool, error) {
+	cleanedPath, err := o.validateSFTPPath(host, path)
+	if err != nil {
+		return nil, false, err
+	}
+
 	sftpClient, cleanup, err := o.openSFTP(ctx, host)
 	if err != nil {
 		return nil, false, err
 	}
 	defer cleanup()
 
-	f, err := sftpClient.Open(path)
+	f, err := sftpClient.Open(cleanedPath)
 	if err != nil {
-		return nil, false, fmt.Errorf("opening %q on %q: %w", path, host, err)
+		return nil, false, fmt.Errorf("opening %q on %q: %w", cleanedPath, host, err)
 	}
 	defer f.Close()
 
@@ -125,6 +163,11 @@ func (o *ops) Read(ctx context.Context, host, path string, maxBytes int) ([]byte
 }
 
 func (o *ops) Write(ctx context.Context, host, path string, content []byte, mode fs.FileMode) error {
+	cleanedPath, err := o.validateSFTPPath(host, path)
+	if err != nil {
+		return err
+	}
+
 	limit := o.cfg.Limits.SFTPMaxWriteBytes
 	if limit > 0 && len(content) > limit {
 		return fmt.Errorf("content size %d exceeds SFTP write limit of %d bytes", len(content), limit)
@@ -136,24 +179,24 @@ func (o *ops) Write(ctx context.Context, host, path string, content []byte, mode
 	}
 	defer cleanup()
 
-	f, err := sftpClient.OpenFile(path, sftpWriteFlags)
+	f, err := sftpClient.OpenFile(cleanedPath, sftpWriteFlags)
 	if err != nil {
-		return fmt.Errorf("opening %q on %q for write: %w", path, host, err)
+		return fmt.Errorf("opening %q on %q for write: %w", cleanedPath, host, err)
 	}
 
 	if _, err := f.Write(content); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("writing to %q on %q: %w", path, host, err)
+		return fmt.Errorf("writing to %q on %q: %w", cleanedPath, host, err)
 	}
 
 	// Close commits the SFTP write; errors here indicate data loss.
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing %q on %q after write: %w", path, host, err)
+		return fmt.Errorf("closing %q on %q after write: %w", cleanedPath, host, err)
 	}
 
 	if mode != 0 {
-		if err := sftpClient.Chmod(path, mode); err != nil {
-			return fmt.Errorf("chmod %q on %q: %w", path, host, err)
+		if err := sftpClient.Chmod(cleanedPath, mode); err != nil {
+			return fmt.Errorf("chmod %q on %q: %w", cleanedPath, host, err)
 		}
 	}
 	return nil
@@ -162,15 +205,20 @@ func (o *ops) Write(ctx context.Context, host, path string, content []byte, mode
 const sftpWriteFlags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 
 func (o *ops) List(ctx context.Context, host, path string) ([]Entry, error) {
+	cleanedPath, err := o.validateSFTPPath(host, path)
+	if err != nil {
+		return nil, err
+	}
+
 	sftpClient, cleanup, err := o.openSFTP(ctx, host)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
 
-	infos, err := sftpClient.ReadDir(path)
+	infos, err := sftpClient.ReadDir(cleanedPath)
 	if err != nil {
-		return nil, fmt.Errorf("listing %q on %q: %w", path, host, err)
+		return nil, fmt.Errorf("listing %q on %q: %w", cleanedPath, host, err)
 	}
 
 	entries := make([]Entry, len(infos))

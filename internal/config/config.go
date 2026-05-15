@@ -44,12 +44,14 @@ type Limits struct {
 
 // Host is a pre-declared SSH target.
 type Host struct {
-	Address     string        `yaml:"address"`
-	User        string        `yaml:"user"`
-	Auth        Auth          `yaml:"auth"`
-	KnownHosts  string        `yaml:"known_hosts"`
-	IdleTimeout time.Duration `yaml:"idle_timeout"`
-	Description string        `yaml:"description,omitempty"`
+	Address             string        `yaml:"address"`
+	User                string        `yaml:"user"`
+	Auth                Auth          `yaml:"auth"`
+	KnownHosts          string        `yaml:"known_hosts"`
+	IdleTimeout         time.Duration `yaml:"idle_timeout"`
+	Description         string        `yaml:"description,omitempty"`
+	SFTPEnabled         bool          `yaml:"sftp_enabled,omitempty"`
+	SFTPAllowedPrefixes []string      `yaml:"sftp_allowed_prefixes,omitempty"`
 }
 
 // Auth specifies how to authenticate to a host.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -42,6 +43,10 @@ func Validate(cfg *Config) error {
 		}
 
 		if err := validateKnownHosts(name, h.KnownHosts); err != nil {
+			errs = append(errs, err)
+		}
+
+		if err := validateSFTPConfig(name, h); err != nil {
 			errs = append(errs, err)
 		}
 
@@ -106,6 +111,21 @@ func normalizeAddress(addr string) (string, error) {
 		return net.JoinHostPort(host, port), nil
 	}
 	return net.JoinHostPort(addr, "22"), nil
+}
+
+func validateSFTPConfig(hostName string, h Host) error {
+	if len(h.SFTPAllowedPrefixes) > 0 && !h.SFTPEnabled {
+		return fmt.Errorf("host %q: sftp_allowed_prefixes requires sftp_enabled: true", hostName)
+	}
+	for _, prefix := range h.SFTPAllowedPrefixes {
+		if !path.IsAbs(prefix) {
+			return fmt.Errorf("host %q: sftp_allowed_prefixes entry %q must be an absolute Unix path", hostName, prefix)
+		}
+		if path.Clean(prefix) != prefix {
+			return fmt.Errorf("host %q: sftp_allowed_prefixes entry %q must be a clean path (got %q)", hostName, prefix, path.Clean(prefix))
+		}
+	}
+	return nil
 }
 
 // expandPath replaces a leading ~ with the user's home directory.
