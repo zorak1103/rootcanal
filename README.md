@@ -199,4 +199,4 @@ See [docs/security.md](docs/security.md) for the full threat model and security 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL v3 — see [LICENSE](LICENSE).
