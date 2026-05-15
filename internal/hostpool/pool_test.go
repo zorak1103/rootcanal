@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,6 +346,72 @@ func TestPool_LostRace_PrefersExistingEntry(t *testing.T) {
 }
 
 // TestPool_LostRace_CapExceeded covers the per-host cap check in the lost-race path.
+// ---- sanitizeConnErr unit tests ----
+
+func TestSanitizeConnErr_NonNetError(t *testing.T) {
+	orig := errors.New("ssh: handshake failed: auth error")
+	got := sanitizeConnErr(orig)
+	if got != orig {
+		t.Errorf("expected non-net error to pass through unchanged")
+	}
+}
+
+func TestSanitizeConnErr_Timeout(t *testing.T) {
+	inner := &net.OpError{Op: "dial", Net: "tcp", Err: &timeoutErr{}}
+	got := sanitizeConnErr(inner)
+	if got.Error() != "connection timed out" {
+		t.Errorf("got %q, want %q", got.Error(), "connection timed out")
+	}
+}
+
+func TestSanitizeConnErr_ConnectionRefused(t *testing.T) {
+	// Dial a port guaranteed to refuse to get a real net.OpError.
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:1", 200*time.Millisecond)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		t.Skip("127.0.0.1:1 unexpectedly accepted a connection")
+	}
+	got := sanitizeConnErr(err)
+	if got == err {
+		t.Fatal("expected net.OpError to be replaced")
+	}
+	msg := got.Error()
+	if strings.Contains(msg, "127.0.0.1") || strings.Contains(msg, ":1") {
+		t.Errorf("sanitized error still contains address: %q", msg)
+	}
+}
+
+// TestPool_DialError_NoAddressLeak verifies end-to-end that a TCP connection
+// failure returned by pool.Get does not expose the remote host:port.
+func TestPool_DialError_NoAddressLeak(t *testing.T) {
+	const addr = "127.0.0.1:1" // port 1 — always refused
+	cfg := minCfg(map[string]config.Host{
+		"h": {Address: addr, User: "u", KnownHosts: "system", Auth: config.Auth{Type: "agent"}},
+	})
+	cfg.Limits.DialTimeout = 200 * time.Millisecond
+
+	p := New(cfg, sshconn.ProdDialer{})
+	defer p.Close()
+
+	_, _, err := p.Get(context.Background(), "h")
+	if err == nil {
+		t.Fatal("expected dial error for unreachable host")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "127.0.0.1") || strings.Contains(msg, ":1") {
+		t.Errorf("pool error leaks host address: %q", msg)
+	}
+}
+
+// timeoutErr is a net.Error that reports Timeout() == true.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
 func TestPool_LostRace_CapExceeded(t *testing.T) {
 	addr, khPath := startSSHServer(t)
 	t.Setenv("TEST_LOSTRACE_CAP_PASS", "irrelevant")

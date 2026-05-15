@@ -2,7 +2,9 @@ package hostpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -65,7 +67,7 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 	// TODO(M3): use singleflight to prevent duplicate dials to the same host.
 	client, err := p.dialer.Dial(ctx, h, p.cfg.Limits)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dialing %q: %w", hostName, err)
+		return nil, nil, fmt.Errorf("connecting to %q: %w", hostName, sanitizeConnErr(err))
 	}
 
 	p.mu.Lock()
@@ -118,6 +120,26 @@ func (p *Pool) releaseFunc(hostName string) func() {
 			})
 		}
 	}
+}
+
+// sanitizeConnErr strips the remote host:port from TCP-level errors so that
+// network addresses are never surfaced to MCP clients. Go's net.OpError
+// embeds the address in its Error() string; we replace it with just the
+// underlying OS reason (e.g. "connection refused", "i/o timeout").
+// SSH-level errors (auth, handshake, known-hosts) do not include network
+// addresses in their messages and are returned unchanged.
+func sanitizeConnErr(err error) error {
+	var netErr *net.OpError
+	if !errors.As(err, &netErr) {
+		return err
+	}
+	if netErr.Timeout() {
+		return errors.New("connection timed out")
+	}
+	if netErr.Err != nil {
+		return fmt.Errorf("network error: %v", netErr.Err)
+	}
+	return errors.New("network error")
 }
 
 // Close immediately closes all cached clients and stops idle timers.

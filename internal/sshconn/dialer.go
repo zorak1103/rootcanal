@@ -20,19 +20,19 @@ type ProdDialer struct{}
 func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits) (*ssh.Client, error) {
 	cfg, err := BuildClientConfig(h)
 	if err != nil {
-		return nil, fmt.Errorf("building client config for %q: %w", h.Address, err)
+		return nil, fmt.Errorf("building SSH client config: %w", err)
 	}
 
 	d := net.Dialer{Timeout: limits.DialTimeout}
 	conn, err := d.DialContext(ctx, "tcp", h.Address)
 	if err != nil {
-		return nil, fmt.Errorf("TCP dial %s: %w", h.Address, err)
+		return nil, fmt.Errorf("TCP connection failed: %w", err)
 	}
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, h.Address, cfg)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("SSH handshake %s: %w", h.Address, err)
+		return nil, fmt.Errorf("SSH handshake failed: %w", err)
 	}
 
 	return ssh.NewClient(sshConn, chans, reqs), nil
