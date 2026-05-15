@@ -7,8 +7,7 @@ vars:
     sh: git describe --tags --always 2>/dev/null || echo dev
   COMMIT:
     sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
-  DATE:
-    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  DATE: '{{ dateInZone "2006-01-02T15:04:05Z" now "UTC" }}'
 
 tasks:
   default:
@@ -37,10 +36,7 @@ tasks:
     cmds:
       - go test ./... -coverprofile=coverage.out -coverpkg=./internal/...
       - go tool cover -func=coverage.out
-      - |
-        pct=$(go tool cover -func=coverage.out | awk '/^total:/{gsub(/%/,"",$NF); print $NF}')
-        echo "Coverage: ${pct}%  (min {{.MIN_COVERAGE}}%)"
-        awk -v p="${pct}" -v m="{{.MIN_COVERAGE}}" 'BEGIN{if(p+0<m+0){print "FAIL: coverage " p "% is below " m "% minimum"; exit 1}}'
+      - go run ./tools/covercheck -min={{.MIN_COVERAGE}} coverage.out
 
   lint:
     desc: Run go vet and staticcheck (install staticcheck once with go install honnef.co/go/tools/cmd/staticcheck@latest)
@@ -66,8 +62,12 @@ tasks:
   clean:
     desc: Remove build artifacts
     cmds:
-      - rm -f rootcanal rootcanal.exe coverage.out coverage.xml
-      - rm -rf dist/
+      - cmd: rm -f rootcanal rootcanal.exe coverage.out coverage.xml
+        platforms: [linux, darwin]
+      - cmd: rm -rf dist/
+        platforms: [linux, darwin]
+      - cmd: cmd /c "del /q /f rootcanal.exe coverage.out coverage.xml 2>nul & if exist dist rmdir /s /q dist & exit 0"
+        platforms: [windows]
 
   run:
     desc: Run rootcanal (pass args after --, e.g. task run -- -config rootcanal.yaml)
