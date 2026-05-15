@@ -2,10 +2,6 @@ version: 2
 
 project_name: rootcanal
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - main: ./cmd/rootcanal
     binary: rootcanal
