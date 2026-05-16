@@ -62,8 +62,8 @@ func isKeyError(err error, out **knownhosts.KeyError) bool {
 // dummyKey is a minimal ssh.PublicKey used only to trigger knownhosts.KeyError.
 type dummyKey struct{}
 
-func (dummyKey) Type() string                          { return ssh.KeyAlgoED25519 }
-func (dummyKey) Marshal() []byte                       { return make([]byte, 51) } // 51 = wire-format for empty ed25519 key
+func (dummyKey) Type() string                            { return ssh.KeyAlgoED25519 }
+func (dummyKey) Marshal() []byte                         { return make([]byte, 51) } // 51 = wire-format for empty ed25519 key
 func (dummyKey) Verify(_ []byte, _ *ssh.Signature) error { return fmt.Errorf("dummy key") }
 
 // resolveKnownHosts converts the "system" sentinel to ~/.ssh/known_hosts.
