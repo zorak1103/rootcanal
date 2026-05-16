@@ -24,7 +24,7 @@ default:
 lint:
   stage: verify
   script:
-    - test -z "$(gofmt -s -l .)" || (gofmt -s -l . && exit 1)
+    - test -z "$(gofmt -s -l $(git ls-files '*.go'))" || (gofmt -s -l $(git ls-files '*.go') && exit 1)
     - go vet ./...
     - go tool staticcheck ./...
 

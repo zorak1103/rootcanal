@@ -271,6 +271,25 @@ func TestBuildAuthMethods_UnknownType(t *testing.T) {
 	}
 }
 
+func TestProdDialer_Dial_ZeroDialTimeout(t *testing.T) {
+	// Regression test: DialTimeout=0 must not set an immediate deadline.
+	// time.Now().Add(0) == now, which would expire before the handshake starts.
+	addr, knownHostsPath := startTestSSHServer(t)
+	t.Setenv("TEST_RC_ZERO_PASS", "x")
+
+	h := config.Host{
+		Address:    addr,
+		User:       "u",
+		KnownHosts: knownHostsPath,
+		Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_RC_ZERO_PASS"},
+	}
+	client, err := ProdDialer{}.Dial(context.Background(), h, config.Limits{DialTimeout: 0})
+	if err != nil {
+		t.Fatalf("Dial with DialTimeout=0 failed: %v (zero timeout must not set an immediate deadline)", err)
+	}
+	_ = client.Close()
+}
+
 func TestProdDialer_Dial_BadHandshake(t *testing.T) {
 	// TCP listener that accepts but does not speak SSH → handshake must fail.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
