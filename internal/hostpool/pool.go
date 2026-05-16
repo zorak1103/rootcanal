@@ -11,6 +11,7 @@ import (
 	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sync/singleflight"
 )
 
 var idleTimeout = 30 * time.Second
@@ -27,6 +28,7 @@ type Pool struct {
 	dialer  sshconn.Dialer
 	mu      sync.Mutex
 	entries map[string]*entry
+	sf      singleflight.Group
 }
 
 // New creates a Pool using the given config and dialer.
@@ -63,33 +65,47 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 	}
 	p.mu.Unlock()
 
-	// Dial outside the lock so other hosts are not blocked.
-	// TODO(M3): use singleflight to prevent duplicate dials to the same host.
-	client, err := p.dialer.Dial(ctx, h, p.cfg.Limits)
+	// Coalesce concurrent dials to the same host: exactly one SSH auth attempt
+	// reaches the server regardless of caller concurrency. The entry is stored
+	// inside the singleflight function so waiters receive a client that is
+	// already in the map — they only bump refs, never close the shared handle.
+	_, err, _ := p.sf.Do(hostName, func() (any, error) {
+		client, err := p.dialer.Dial(ctx, h, p.cfg.Limits)
+		if err != nil {
+			return nil, err
+		}
+		p.mu.Lock()
+		// Defensive: if a racing singleflight call already stored an entry
+		// (possible after a previous Do completed for the same key), prefer it.
+		if existing, ok := p.entries[hostName]; ok {
+			p.mu.Unlock()
+			_ = client.Close()
+			return existing.client, nil
+		}
+		p.entries[hostName] = &entry{client: client, refs: 0}
+		p.mu.Unlock()
+		return client, nil
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("connecting to %q: %w", hostName, sanitizeConnErr(err))
 	}
 
 	p.mu.Lock()
-	// Another goroutine may have dialed concurrently; prefer the existing entry.
-	// Hold the lock from check through refs bump to avoid TOCTOU.
-	if existing, ok := p.entries[hostName]; ok {
-		if p.cfg.Limits.MaxSessionsPerHost > 0 && existing.refs >= p.cfg.Limits.MaxSessionsPerHost {
-			p.mu.Unlock()
-			_ = client.Close()
-			return nil, nil, fmt.Errorf("host %q: per-host session limit of %d reached", hostName, p.cfg.Limits.MaxSessionsPerHost)
-		}
-		if existing.idleTimer != nil {
-			existing.idleTimer.Stop()
-			existing.idleTimer = nil
-		}
-		existing.refs++
-		c := existing.client
+	e, ok := p.entries[hostName]
+	if !ok {
 		p.mu.Unlock()
-		_ = client.Close() // close the duplicate outside the lock
-		return c, p.releaseFunc(hostName), nil
+		return nil, nil, fmt.Errorf("host %q: entry vanished after dial", hostName)
 	}
-	p.entries[hostName] = &entry{client: client, refs: 1}
+	if p.cfg.Limits.MaxSessionsPerHost > 0 && e.refs >= p.cfg.Limits.MaxSessionsPerHost {
+		p.mu.Unlock()
+		return nil, nil, fmt.Errorf("host %q: per-host session limit of %d reached", hostName, p.cfg.Limits.MaxSessionsPerHost)
+	}
+	if e.idleTimer != nil {
+		e.idleTimer.Stop()
+		e.idleTimer = nil
+	}
+	e.refs++
+	client := e.client
 	p.mu.Unlock()
 
 	return client, p.releaseFunc(hostName), nil

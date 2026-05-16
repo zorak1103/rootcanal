@@ -78,6 +78,9 @@ func handleSFTPWrite(ops sftpops.Ops) func(context.Context, *mcp.CallToolRequest
 			if err != nil {
 				return toolErr(fmt.Errorf("invalid mode %q: use octal notation such as '0644' or '755'", in.Mode))
 			}
+			if n&0o7000 != 0 {
+				return toolErr(fmt.Errorf("invalid mode %q: setuid/setgid/sticky bits not permitted; use only permission bits 0-0777", in.Mode))
+			}
 			mode = fs.FileMode(n)
 		}
 

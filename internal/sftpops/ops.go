@@ -195,6 +195,9 @@ func (o *ops) Write(ctx context.Context, host, path string, content []byte, mode
 	}
 
 	if mode != 0 {
+		if uint32(mode)&0o7000 != 0 {
+			return fmt.Errorf("refusing chmod %q on %q: special bits set in mode %04o", cleanedPath, host, uint32(mode))
+		}
 		if err := sftpClient.Chmod(cleanedPath, mode); err != nil {
 			return fmt.Errorf("chmod %q on %q: %w", cleanedPath, host, err)
 		}

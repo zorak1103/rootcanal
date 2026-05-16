@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"golang.org/x/crypto/ssh"
@@ -29,10 +30,23 @@ func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits)
 		return nil, fmt.Errorf("TCP connection failed: %w", err)
 	}
 
+	// Bound the SSH handshake so a slow or malicious server cannot stall the
+	// goroutine indefinitely. The deadline is cleared after a successful
+	// handshake so long-lived SSH sessions are not killed when it expires.
+	if err := conn.SetDeadline(time.Now().Add(limits.DialTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("setting SSH handshake deadline: %w", err)
+	}
+
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, h.Address, cfg)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("SSH handshake failed: %w", err)
+	}
+
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = sshConn.Close()
+		return nil, fmt.Errorf("clearing handshake deadline: %w", err)
 	}
 
 	return ssh.NewClient(sshConn, chans, reqs), nil
@@ -45,7 +59,7 @@ func BuildClientConfig(h config.Host) (*ssh.ClientConfig, error) {
 		return nil, err
 	}
 
-	cb, algos, err := hostKeyCallback(h)
+	cb, algos, err := hostKeyCallback(h, h.Address)
 	if err != nil {
 		return nil, err
 	}

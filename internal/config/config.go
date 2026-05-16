@@ -64,6 +64,9 @@ type Auth struct {
 
 // Load reads, interpolates, and validates a config file.
 func Load(path string) (*Config, error) {
+	if err := checkFilePerms(path); err != nil {
+		return nil, err
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config %q: %w", path, err)
