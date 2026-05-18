@@ -57,6 +57,9 @@ func NewManager(cfg *config.Config, pool *hostpool.Pool, log *slog.Logger) Manag
 }
 
 func newManager(cfg *config.Config, factory newSessionFn, log *slog.Logger) *manager {
+	if log == nil {
+		log = slog.Default()
+	}
 	m := &manager{
 		cfg:      cfg,
 		factory:  factory,
@@ -190,9 +193,7 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 		close(done)
 	}()
 
-	if m.log != nil {
-		m.log.Info("session opened", "id", id, "host", host)
-	}
+	m.log.Info("session opened", "id", id, "host", host)
 	return id, nil
 }
 
@@ -225,16 +226,15 @@ func (m *manager) Send(ctx context.Context, id string, input []byte, timeout tim
 	s.mu.Unlock()
 
 	if len(input) > 0 {
-		type writeResult struct{ err error }
-		ch := make(chan writeResult, 1)
+		ch := make(chan error, 1)
 		go func() {
 			_, err := s.stdin.Write(input)
-			ch <- writeResult{err}
+			ch <- err
 		}()
 		select {
-		case r := <-ch:
-			if r.err != nil {
-				return nil, false, false, fmt.Errorf("writing to session %q stdin: %w", id, r.err)
+		case err := <-ch:
+			if err != nil {
+				return nil, false, false, fmt.Errorf("writing to session %q stdin: %w", id, err)
 			}
 		case <-ctx.Done():
 			return nil, false, false, ctx.Err()
@@ -283,9 +283,7 @@ func (m *manager) Close(_ context.Context, id string) error {
 	_ = s.sshSess.Close()
 	s.releasePool()
 
-	if m.log != nil {
-		m.log.Info("session closed", "id", id, "host", s.host)
-	}
+	m.log.Info("session closed", "id", id, "host", s.host)
 	return nil
 }
 
@@ -340,12 +338,8 @@ func (m *manager) runGC() {
 	maxAge := limits.MaxSessionAge
 
 	interval := min(idleTimeout, maxAge) / 4
-	if interval > 60*time.Second {
-		interval = 60 * time.Second
-	}
-	if interval < time.Second {
-		interval = time.Second
-	}
+	interval = min(interval, 60*time.Second)
+	interval = max(interval, time.Second)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -362,7 +356,7 @@ func (m *manager) runGC() {
 
 func (m *manager) gcTick(idleTimeout, maxAge time.Duration) {
 	m.mu.RLock()
-	snapshot := make([]string, 0)
+	var snapshot []string
 	for id, s := range m.sessions {
 		if s.isExpired(idleTimeout, maxAge) {
 			snapshot = append(snapshot, id)
@@ -371,9 +365,7 @@ func (m *manager) gcTick(idleTimeout, maxAge time.Duration) {
 	m.mu.RUnlock()
 
 	for _, id := range snapshot {
-		if m.log != nil {
-			m.log.Info("GC closing idle session", "id", id)
-		}
+		m.log.Info("GC closing idle session", "id", id)
 		_ = m.Close(context.Background(), id)
 	}
 }
