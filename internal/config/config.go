@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"gitlab.com/zorak1103/rootcanal/internal/fileperms"
 	"gopkg.in/yaml.v3"
 )
 
@@ -64,7 +65,7 @@ type Auth struct {
 
 // Load reads, interpolates, and validates a config file.
 func Load(path string) (*Config, error) {
-	if err := checkFilePerms(path); err != nil {
+	if err := fileperms.Check(path); err != nil {
 		return nil, err
 	}
 	raw, err := os.ReadFile(path)
