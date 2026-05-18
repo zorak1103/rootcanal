@@ -74,7 +74,7 @@ release:
 renovate:
   stage: maintenance
   image:
-    name: renovate/renovate:40
+    name: renovate/renovate:43
     entrypoint: [""]
   variables:
     LOG_LEVEL: info
