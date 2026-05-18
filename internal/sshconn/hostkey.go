@@ -1,12 +1,14 @@
 package sshconn
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/fileperms"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -16,7 +18,7 @@ import (
 // server from negotiating a weaker algorithm than the one the key was recorded with.
 func hostKeyCallback(h config.Host, hostport string) (ssh.HostKeyCallback, []string, error) {
 	path := resolveKnownHosts(h.KnownHosts)
-	if err := checkFilePerms(path); err != nil {
+	if err := fileperms.Check(path); err != nil {
 		return nil, nil, err
 	}
 	cb, err := knownhosts.New(path)
@@ -36,7 +38,7 @@ func knownHostAlgorithms(cb ssh.HostKeyCallback, hostport string) []string {
 	}
 	err := cb(hostport, addr, dummyKey{})
 	var kerr *knownhosts.KeyError
-	if !isKeyError(err, &kerr) || len(kerr.Want) == 0 {
+	if !errors.As(err, &kerr) || len(kerr.Want) == 0 {
 		return nil
 	}
 	seen := map[string]bool{}
@@ -48,15 +50,6 @@ func knownHostAlgorithms(cb ssh.HostKeyCallback, hostport string) []string {
 		}
 	}
 	return algos
-}
-
-// isKeyError reports whether err is a *knownhosts.KeyError and sets out if so.
-func isKeyError(err error, out **knownhosts.KeyError) bool {
-	if kerr, ok := err.(*knownhosts.KeyError); ok {
-		*out = kerr
-		return true
-	}
-	return false
 }
 
 // dummyKey is a minimal ssh.PublicKey used only to trigger knownhosts.KeyError.

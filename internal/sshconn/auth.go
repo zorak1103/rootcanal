@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/fileperms"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -25,7 +26,7 @@ func buildAuthMethods(h config.Host) ([]ssh.AuthMethod, error) {
 
 func buildKeyAuth(a config.Auth) ([]ssh.AuthMethod, error) {
 	keyPath := expandPath(a.KeyPath)
-	if err := checkFilePerms(keyPath); err != nil {
+	if err := fileperms.Check(keyPath); err != nil {
 		return nil, err
 	}
 

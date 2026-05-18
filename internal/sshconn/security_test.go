@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/fileperms"
 )
 
 // ---- MAN-002: HostKeyAlgorithms pinning ----
@@ -28,12 +30,9 @@ func TestHostKeyCallback_PinsAlgorithms(t *testing.T) {
 	}
 	// The test server uses ECDSA P256; verify the pinned type matches.
 	const wantAlgo = "ecdsa-sha2-nistp256"
-	for _, a := range algos {
-		if a == wantAlgo {
-			return
-		}
+	if !slices.Contains(algos, wantAlgo) {
+		t.Errorf("expected %q in pinned algorithms %v", wantAlgo, algos)
 	}
-	t.Errorf("expected %q in pinned algorithms %v", wantAlgo, algos)
 }
 
 func TestHostKeyCallback_NilAlgos_UnknownHost(t *testing.T) {
@@ -147,7 +146,7 @@ func TestCheckFilePerms_InsecurePermissions(t *testing.T) {
 		if err := os.WriteFile(path, []byte("key"), tt.perm); err != nil {
 			t.Fatalf("WriteFile %04o: %v", tt.perm, err)
 		}
-		err := checkFilePerms(path)
+		err := fileperms.Check(path)
 		if tt.wantErr && err == nil {
 			t.Errorf("perm %04o: expected error, got nil", tt.perm)
 		}
