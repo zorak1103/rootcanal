@@ -1,0 +1,8 @@
+#!/bin/sh
+# Mirrors the CI lint check: fail if any tracked .go file needs gofmt -s.
+bad=$(gofmt -s -l $(git ls-files '*.go'))
+if [ -n "$bad" ]; then
+  echo "gofmt -s required for:"
+  echo "$bad"
+  exit 1
+fi

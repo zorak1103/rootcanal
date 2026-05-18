@@ -74,6 +74,13 @@ tasks:
     cmds:
       - go test -tags=e2e -count=1 -timeout=8m ./e2e/... -v
 
+  setup:
+    desc: Activate committed git hooks (run once after cloning)
+    cmds:
+      - git config core.hooksPath .githooks
+      - chmod +x .githooks/pre-commit
+      - echo "Git hooks activated."
+
   run:
     desc: Run rootcanal (pass args after --, e.g. task run -- -config rootcanal.yaml)
     cmds:
