@@ -251,6 +251,18 @@ Race detector (requires CGO):
 CGO_ENABLED=1 go test ./... -race
 ```
 
+### End-to-end tests
+
+The `e2e/` directory contains end-to-end tests that run the real `rootcanal` binary against an openssh-server Docker container. They are excluded from the CI pipeline (via the `//go:build e2e` tag) and are intended for local use only.
+
+**Requirements:** Docker (Desktop or Engine) must be running.
+
+```sh
+task e2e   # build binary, start container, run ~40 tests, teardown
+```
+
+The tests exercise the full stack: real SSH PTY sessions, SFTP file operations, auth strategies (key, passphrase, password), host-key strict pinning, session/SFTP limits, MCP logging, and graceful shutdown. Because the container is ephemeral and easily restored, tests may modify files inside it freely.
+
 ## Security
 
 See [docs/security.md](docs/security.md) for the full threat model and security boundary documentation.

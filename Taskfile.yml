@@ -69,6 +69,11 @@ tasks:
       - cmd: cmd /c "del /q /f rootcanal.exe coverage.out coverage.xml 2>nul & if exist dist rmdir /s /q dist & exit 0"
         platforms: [windows]
 
+  e2e:
+    desc: Run end-to-end tests against a real SSH container (requires Docker)
+    cmds:
+      - go test -tags=e2e -count=1 -timeout=8m ./e2e/... -v
+
   run:
     desc: Run rootcanal (pass args after --, e.g. task run -- -config rootcanal.yaml)
     cmds:
