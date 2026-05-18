@@ -115,9 +115,9 @@ func genFixtures(ctx context.Context, tmpDir string, cenv *containerEnv) (*fixtu
 		KHPath:      toSlash(khPath),
 		BadKHPath:   toSlash(badKHPath),
 		// Main config: loose session limits so non-limit tests can open freely.
-		MaxSessionsTotal: 10,
+		MaxSessionsTotal:   10,
 		MaxSessionsPerHost: 4,
-		OutputBufferBytes: 0, // use server default (1 MiB)
+		OutputBufferBytes:  0, // use server default (1 MiB)
 	}); err != nil {
 		return nil, fmt.Errorf("render main config: %w", err)
 	}

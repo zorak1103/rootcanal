@@ -22,7 +22,7 @@ const (
 
 type containerEnv struct {
 	container  testcontainers.Container
-	MappedPort string       // host-side port number string, e.g. "32768"
+	MappedPort string // host-side port number string, e.g. "32768"
 	HostPubKey ssh.PublicKey
 }
 
