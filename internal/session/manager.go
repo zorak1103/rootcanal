@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -179,10 +180,8 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	}
 
 	now := time.Now()
-	id := newSessionID()
-	done := make(chan struct{})
+	// Create session struct before bootSession so it can write/read.
 	s := &session{
-		id:          id,
 		name:        name,
 		host:        host,
 		sshSess:     sshSess,
@@ -191,8 +190,18 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 		openedAt:    now,
 		lastUsedAt:  now,
 		out:         buf,
-		done:        done,
+		done:        make(chan struct{}),
 	}
+
+	// Suppress MOTD and set up a clean shell environment.
+	if err := m.bootSession(ctx, s, 5*time.Second); err != nil {
+		_ = sshSess.Close()
+		releasePool()
+		return "", fmt.Errorf("booting shell on %q: %w", host, err)
+	}
+
+	id := newSessionID()
+	s.id = id
 
 	m.mu.Lock()
 	if m.stopping {
@@ -209,11 +218,49 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	// Launch Wait goroutine after registration so Shutdown cannot miss this session.
 	go func() {
 		_ = sshSess.Wait()
-		close(done)
+		close(s.done)
 	}()
 
 	m.log.Info("session opened", "id", id, "host", host)
 	return id, nil
+}
+
+// bootSession initialises a freshly started shell: suppresses MOTD and sets
+// up a clean environment (no echo, empty PS1/PS2). It writes a ready marker
+// and blocks until the shell echoes it back or maxWait is exceeded.
+func (m *manager) bootSession(ctx context.Context, s *session, maxWait time.Duration) error {
+	nonce := newMarkerNonce()
+	bootCmd := fmt.Sprintf(
+		"stty -echo 2>/dev/null; export PS1='' PS2=''; printf '\\nRC_READY_%s\\n'\n",
+		nonce,
+	)
+	if _, err := s.stdin.Write([]byte(bootCmd)); err != nil {
+		return fmt.Errorf("boot: write: %w", err)
+	}
+
+	marker := []byte("RC_READY_" + nonce)
+	deadline := time.Now().Add(maxWait)
+	var accumulated []byte
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("session boot timeout after %s: shell did not respond to ready marker", maxWait)
+		}
+		bCtx, cancel := context.WithDeadline(ctx, deadline)
+		s.out.WaitForData(bCtx, 100*time.Millisecond, remaining)
+		cancel()
+
+		chunk, _ := s.out.Drain()
+		accumulated = append(accumulated, chunk...)
+
+		if bytes.Contains(accumulated, marker) {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
 }
 
 func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult, error) {

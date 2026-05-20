@@ -54,9 +54,20 @@ func (f *fakeSession) Shell() error {
 		for {
 			select {
 			case input := <-f.stdinCh:
-				if f.outWriter != nil {
-					_, _ = f.outWriter.Write(append([]byte("$ "), input...))
+				if f.outWriter == nil {
+					continue
 				}
+				// Boot marker: respond with the RC_READY_<nonce> marker.
+				if idx := bytes.Index(input, []byte("RC_READY_")); idx != -1 {
+					rest := input[idx:]
+					if end := bytes.IndexByte(rest, '\n'); end > 0 {
+						marker := rest[:end] // "RC_READY_<nonce>"
+						_, _ = f.outWriter.Write(append(append([]byte("\n"), marker...), '\n'))
+					}
+					continue
+				}
+				// Default: echo input (used by raw-mode tests and Task 5).
+				_, _ = f.outWriter.Write(append([]byte("$ "), input...))
 			case <-f.closeCh:
 				return
 			}
@@ -88,6 +99,15 @@ func (s *fakeStdin) Close() error { return nil }
 // ---- factory helpers ----
 
 func fakeSessions(sessions ...*fakeSession) newSessionFn {
+	ifaces := make([]sshSession, len(sessions))
+	for i, s := range sessions {
+		ifaces[i] = s
+	}
+	return fakeSessionsIface(ifaces...)
+}
+
+// fakeSessionsIface is like fakeSessions but accepts any sshSession implementation.
+func fakeSessionsIface(sessions ...sshSession) newSessionFn {
 	idx := 0
 	return func(_ context.Context, _ string) (sshSession, func(), error) {
 		if idx >= len(sessions) {
@@ -651,6 +671,74 @@ func TestManager_Open_TOCTOU_PerHostCap(t *testing.T) {
 	if got := int(successCount.Load()); got > maxPerHost {
 		t.Errorf("per-host cap bypassed: %d sessions for host, cap was %d", got, maxPerHost)
 	}
+}
+
+func TestManager_Open_BootMarkerDrainsOutput(t *testing.T) {
+	// motdFakeSession emits MOTD before responding to the boot marker.
+	fs := &motdFakeSession{
+		fakeSession: newFakeSession(),
+		motd:        "Welcome to Ubuntu 24.04.4 LTS\n\nLast login: Mon May 20 06:43:00 2026\n",
+	}
+	mgr := newManager(minCfg(), fakeSessionsIface(fs), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, err := mgr.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected non-empty session ID")
+	}
+
+	// The ring buffer should be empty after bootSession drained MOTD.
+	// A Send that writes nothing and uses peek mode should see no output.
+	res, err := mgr.Send(context.Background(), id, SendInput{WaitIdleMs: 100})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if res.Output != "" {
+		t.Errorf("expected empty output after boot (MOTD should be drained), got %q", res.Output)
+	}
+
+	_, _ = mgr.Close(context.Background(), id)
+}
+
+// motdFakeSession emits a MOTD banner before responding to the boot marker.
+type motdFakeSession struct {
+	*fakeSession
+	motd string
+}
+
+func (m *motdFakeSession) Shell() error {
+	if m.shellErr != nil {
+		return m.shellErr
+	}
+	go func() {
+		// Emit MOTD immediately.
+		if m.outWriter != nil && m.motd != "" {
+			_, _ = m.outWriter.Write([]byte(m.motd))
+		}
+		for {
+			select {
+			case input := <-m.stdinCh:
+				if m.outWriter == nil {
+					continue
+				}
+				if idx := bytes.Index(input, []byte("RC_READY_")); idx != -1 {
+					rest := input[idx:]
+					if end := bytes.IndexByte(rest, '\n'); end > 0 {
+						marker := rest[:end]
+						_, _ = m.outWriter.Write(append(append([]byte("\n"), marker...), '\n'))
+					}
+					continue
+				}
+				_, _ = m.outWriter.Write(append([]byte("$ "), input...))
+			case <-m.closeCh:
+				return
+			}
+		}
+	}()
+	return nil
 }
 
 func TestManager_Open_FailureReleasesReservation(t *testing.T) {
