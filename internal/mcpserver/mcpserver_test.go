@@ -107,13 +107,14 @@ func TestToolsList(t *testing.T) {
 		"ssh_session_close", "ssh_session_list",
 		"sftp_read", "sftp_write", "sftp_list",
 		"ssh_list_hosts", "ssh_host_capabilities",
+		"ssh_run_once",
 	} {
 		if !names[expected] {
 			t.Errorf("missing tool %q", expected)
 		}
 	}
-	if got := len(result.Tools); got != 9 {
-		t.Errorf("expected 9 tools, got %d", got)
+	if got := len(result.Tools); got != 10 {
+		t.Errorf("expected 10 tools, got %d", got)
 	}
 }
 
@@ -128,13 +129,18 @@ func TestToolsList_NoCfg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if got := len(result.Tools); got != 7 {
-		t.Errorf("expected 7 tools without cfg, got %d", got)
+	if got := len(result.Tools); got != 8 {
+		t.Errorf("expected 8 tools without cfg, got %d", got)
 	}
+	names := make(map[string]bool)
 	for _, tool := range result.Tools {
+		names[tool.Name] = true
 		if tool.Name == "ssh_list_hosts" || tool.Name == "ssh_host_capabilities" {
 			t.Errorf("discovery tool %q should not be registered without cfg", tool.Name)
 		}
+	}
+	if !names["ssh_run_once"] {
+		t.Error("ssh_run_once should be registered even without cfg")
 	}
 }
 
@@ -698,6 +704,55 @@ func TestHostCapabilities_UnknownHost(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Error("expected IsError=true for unknown host")
+	}
+}
+
+func TestRunOnceTool(t *testing.T) {
+	ec := 0
+	mgr := &fakeManager{
+		openFn: func(_ context.Context, _, _ string) (string, error) { return "", nil },
+		sendFn: func(_ context.Context, _ string, _ session.SendInput) (session.SendResult, error) {
+			return session.SendResult{}, nil
+		},
+		closeFn: func(_ context.Context, _ string) (string, error) { return "", nil },
+		listFn:  func() []session.SessionInfo { return nil },
+		runOnceFn: func(_ context.Context, host string, in session.RunOnceInput) (session.RunOnceOutput, error) {
+			return session.RunOnceOutput{
+				Stdout:   "total 0\n",
+				ExitCode: ec,
+			}, nil
+		},
+	}
+	sess := newTestClient(t, mgr, &fakeOps{
+		readFn:  func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) { return nil, false, nil },
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+		listFn:  func(_ context.Context, _, _ string) ([]sftpops.Entry, error) { return nil, nil },
+	}, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_run_once",
+		Arguments: map[string]any{"host": "mynas", "command": "ls /"},
+	})
+	if err != nil {
+		t.Fatalf("ssh_run_once: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool error: %v", res.Content)
+	}
+
+	var out struct {
+		Stdout   string `json:"stdout"`
+		ExitCode int    `json:"exit_code"`
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if jsonErr := json.Unmarshal([]byte(text), &out); jsonErr != nil {
+		t.Fatalf("parse: %v", jsonErr)
+	}
+	if out.ExitCode != 0 {
+		t.Errorf("exit_code = %d, want 0", out.ExitCode)
+	}
+	if out.Stdout != "total 0\n" {
+		t.Errorf("stdout = %q", out.Stdout)
 	}
 }
 

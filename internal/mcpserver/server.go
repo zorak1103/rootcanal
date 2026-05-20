@@ -66,6 +66,12 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, onInitialized
 		Description: "List the contents of a directory on a remote host via SFTP.",
 	}, handleSFTPList(ops))
 
+	// Run-once tool (always registered)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "ssh_run_once",
+		Description: "Execute a single command on a pre-declared host via SSH exec channel (no PTY). Returns stdout, stderr, and exit_code. Use this for one-shot reads (df, ls, docker inspect, cat) instead of open/send/close. Requires a POSIX-compatible remote shell.",
+	}, handleRunOnce(mgr))
+
 	// Discovery tools (available when cfg is provided)
 	if cfg != nil {
 		mcp.AddTool(srv, &mcp.Tool{
