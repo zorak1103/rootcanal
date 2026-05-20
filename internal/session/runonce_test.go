@@ -33,10 +33,9 @@ func TestCappedBuffer_Write_ExactCap(t *testing.T) {
 func TestCappedBuffer_Write_OverCap(t *testing.T) {
 	cb := &cappedBuffer{cap: 3}
 	n, err := cb.Write([]byte("hello"))
-	// The implementation truncates p before writing, so n == remaining (3).
-	// err must be nil regardless so the caller doesn't treat it as fatal.
-	if n != 3 || err != nil {
-		t.Errorf("Write = (%d, %v), want (3, nil)", n, err)
+	// io.Writer contract: must return len(p) even when truncating.
+	if n != 5 || err != nil {
+		t.Errorf("Write = (%d, %v), want (5, nil)", n, err)
 	}
 	if cb.String() != "hel" {
 		t.Errorf("String = %q, want %q", cb.String(), "hel")
@@ -49,7 +48,10 @@ func TestCappedBuffer_Write_OverCap(t *testing.T) {
 func TestCappedBuffer_Write_AfterFull(t *testing.T) {
 	cb := &cappedBuffer{cap: 3}
 	cb.Write([]byte("abc"))
-	cb.Write([]byte("more")) // all discarded
+	n, err := cb.Write([]byte("more")) // all discarded; must still return (4, nil)
+	if n != 4 || err != nil {
+		t.Errorf("Write after full = (%d, %v), want (4, nil)", n, err)
+	}
 	if cb.String() != "abc" {
 		t.Errorf("String = %q, want %q", cb.String(), "abc")
 	}
@@ -71,15 +73,15 @@ func TestCappedBuffer_Concurrent(t *testing.T) {
 	// its mux goroutine).
 	cb := &cappedBuffer{cap: 1000}
 	done := make(chan struct{})
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		go func() {
-			for j := 0; j < 20; j++ {
+			for range 20 {
 				cb.Write([]byte(strings.Repeat("x", 5)))
 			}
 			done <- struct{}{}
 		}()
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		<-done
 	}
 	// Just verify it didn't panic and String/Truncated don't race.

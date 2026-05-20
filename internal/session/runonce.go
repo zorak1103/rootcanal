@@ -23,18 +23,19 @@ type cappedBuffer struct {
 func (c *cappedBuffer) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	orig := len(p)
 	remaining := c.cap - c.written
 	if remaining <= 0 {
 		c.truncated = true
-		return len(p), nil
+		return orig, nil
 	}
-	if int64(len(p)) > remaining {
+	if int64(orig) > remaining {
 		c.truncated = true
 		p = p[:remaining]
 	}
 	n, err := c.buf.Write(p)
 	c.written += int64(n)
-	return len(p), err
+	return orig, err
 }
 
 func (c *cappedBuffer) String() string {
