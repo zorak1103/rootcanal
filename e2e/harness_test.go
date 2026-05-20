@@ -30,11 +30,55 @@ type Harness struct {
 
 // SendResult holds the decoded result of ssh_session_send.
 type SendResult struct {
-	Output    string
+	Output       string
+	Truncated    bool
+	Closed       bool // true when ClosedReason != "" (backward compat)
+	ClosedReason string
+	ExitCode     *int
+	StillRunning bool
+	Warnings     []string
+	IsError      bool
+	ErrText      string
+}
+
+// RunOnceResult holds the decoded result of ssh_run_once.
+type RunOnceResult struct {
+	Stdout    string
+	Stderr    string
+	ExitCode  int
+	Signal    string
 	Truncated bool
-	Closed    bool
+	Warnings  []string
 	IsError   bool
 	ErrText   string
+}
+
+// ListHostsResult holds the decoded result of ssh_list_hosts.
+type ListHostsResult struct {
+	Hosts   []HostEntry
+	IsError bool
+	ErrText string
+}
+
+// HostEntry is one entry from ssh_list_hosts.
+type HostEntry struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Address     string `json:"address"`
+	User        string `json:"user"`
+	AuthType    string `json:"auth_type"`
+	SFTPEnabled bool   `json:"sftp_enabled"`
+}
+
+// HostCapabilitiesResult holds the decoded result of ssh_host_capabilities.
+type HostCapabilitiesResult struct {
+	SSH                 bool
+	SFTP                bool
+	SFTPAllowedPrefixes []string
+	IdleTimeoutMs       int64
+	MaxSessionAgeMs     int64
+	IsError             bool
+	ErrText             string
 }
 
 // ReadResult holds the decoded result of sftp_read.
@@ -161,12 +205,111 @@ func (h *Harness) Send(id, input string, timeoutMs int) SendResult {
 		return SendResult{IsError: true, ErrText: textOf(res)}
 	}
 	var out struct {
-		Output    string `json:"output"`
-		Truncated bool   `json:"truncated"`
-		Closed    bool   `json:"closed"`
+		Output       string   `json:"output"`
+		Truncated    bool     `json:"truncated"`
+		ClosedReason string   `json:"closed_reason"`
+		ExitCode     *int     `json:"exit_code"`
+		StillRunning bool     `json:"still_running"`
+		Warnings     []string `json:"warnings"`
 	}
 	decodeStructured(res, &out)
-	return SendResult{Output: out.Output, Truncated: out.Truncated, Closed: out.Closed}
+	return SendResult{
+		Output:       out.Output,
+		Truncated:    out.Truncated,
+		ClosedReason: out.ClosedReason,
+		Closed:       out.ClosedReason != "",
+		ExitCode:     out.ExitCode,
+		StillRunning: out.StillRunning,
+		Warnings:     out.Warnings,
+	}
+}
+
+// RunOnce calls ssh_run_once and returns the decoded result.
+func (h *Harness) RunOnce(host, command string, opts ...map[string]any) RunOnceResult {
+	h.t.Helper()
+	args := map[string]any{"host": host, "command": command}
+	for _, extra := range opts {
+		for k, v := range extra {
+			args[k] = v
+		}
+	}
+	res, err := h.sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_run_once",
+		Arguments: args,
+	})
+	if err != nil {
+		h.t.Fatalf("RunOnce protocol error: %v", err)
+	}
+	if res.IsError {
+		return RunOnceResult{IsError: true, ErrText: textOf(res)}
+	}
+	var out struct {
+		Stdout    string   `json:"stdout"`
+		Stderr    string   `json:"stderr"`
+		ExitCode  int      `json:"exit_code"`
+		Signal    string   `json:"signal"`
+		Truncated bool     `json:"truncated"`
+		Warnings  []string `json:"warnings"`
+	}
+	decodeStructured(res, &out)
+	return RunOnceResult{
+		Stdout:    out.Stdout,
+		Stderr:    out.Stderr,
+		ExitCode:  out.ExitCode,
+		Signal:    out.Signal,
+		Truncated: out.Truncated,
+		Warnings:  out.Warnings,
+	}
+}
+
+// ListHosts calls ssh_list_hosts.
+func (h *Harness) ListHosts() ListHostsResult {
+	h.t.Helper()
+	res, err := h.sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_list_hosts",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		h.t.Fatalf("ListHosts protocol error: %v", err)
+	}
+	if res.IsError {
+		return ListHostsResult{IsError: true, ErrText: textOf(res)}
+	}
+	var out struct {
+		Hosts []HostEntry `json:"hosts"`
+	}
+	decodeStructured(res, &out)
+	return ListHostsResult{Hosts: out.Hosts}
+}
+
+// HostCapabilities calls ssh_host_capabilities.
+func (h *Harness) HostCapabilities(host string) HostCapabilitiesResult {
+	h.t.Helper()
+	res, err := h.sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_host_capabilities",
+		Arguments: map[string]any{"host": host},
+	})
+	if err != nil {
+		h.t.Fatalf("HostCapabilities protocol error: %v", err)
+	}
+	if res.IsError {
+		return HostCapabilitiesResult{IsError: true, ErrText: textOf(res)}
+	}
+	var out struct {
+		SSH                 bool     `json:"ssh"`
+		SFTP                bool     `json:"sftp"`
+		SFTPAllowedPrefixes []string `json:"sftp_allowed_prefixes"`
+		IdleTimeoutMs       int64    `json:"idle_timeout_ms"`
+		MaxSessionAgeMs     int64    `json:"max_session_age_ms"`
+	}
+	decodeStructured(res, &out)
+	return HostCapabilitiesResult{
+		SSH:                 out.SSH,
+		SFTP:                out.SFTP,
+		SFTPAllowedPrefixes: out.SFTPAllowedPrefixes,
+		IdleTimeoutMs:       out.IdleTimeoutMs,
+		MaxSessionAgeMs:     out.MaxSessionAgeMs,
+	}
 }
 
 func (h *Harness) CloseSession(id string) {
