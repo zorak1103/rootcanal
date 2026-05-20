@@ -6,6 +6,92 @@ are deterministic; sub-string matching is safe.
 
 ---
 
+## ssh_list_hosts
+
+Lists all configured hosts with non-sensitive metadata.
+
+No parameters.
+
+**Success:**
+```json
+{
+  "hosts": [
+    {
+      "name": "prod-web",
+      "description": "Production web server",
+      "address": "prod-web.example.com:22",
+      "user": "deploy",
+      "auth_type": "key",
+      "sftp_enabled": false
+    }
+  ]
+}
+```
+
+Hosts are sorted alphabetically by name. Credentials never appear.
+
+---
+
+## ssh_host_capabilities
+
+Returns SSH/SFTP capabilities and session limits for a specific host.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `host` | string | yes | Config key (e.g. `"prod-web"`). |
+
+**Success:**
+```json
+{
+  "ssh": true,
+  "sftp": false,
+  "sftp_allowed_prefixes": [],
+  "idle_timeout_ms": 900000,
+  "max_session_age_ms": 14400000
+}
+```
+
+**Errors:** `"unknown host \"<name>\""` if not in config.
+
+---
+
+## ssh_run_once
+
+Executes a command on the remote host via a non-PTY exec channel. No session open/close required.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `host` | string | yes | Config key (e.g. `"prod-web"`). Not a raw IP or hostname. |
+| `command` | string | yes | Shell command string passed to the remote shell. Requires POSIX-compatible shell (`sh`, `bash`, `zsh`, `dash`, `busybox`). |
+| `stdin` | string | no | Data to pipe to the command's stdin. |
+| `env` | object | no | Key/value environment variables. May be silently rejected by remote `AcceptEnv` policy. |
+| `timeout_ms` | int | no | 0 → server default. Hard cap: 60 000 ms. Higher values clamped and reported via `warnings`. |
+
+**Success:**
+```json
+{
+  "stdout": "Filesystem      Size  Used Avail Use% Mounted on\n...",
+  "stderr": "",
+  "exit_code": 0,
+  "signal": "",
+  "truncated": false,
+  "warnings": []
+}
+```
+
+- `exit_code`: always present. `0` = success, non-zero = failure, `-1` = killed by signal.
+- `signal`: non-empty when process was killed by a signal (e.g. `"TERM"`).
+- `truncated`: `true` if stdout OR stderr hit the per-stream cap (default 1 MiB each).
+- `warnings`: advisory messages, e.g. `"timeout_ms clamped from 60001 to 60000"`, `"setenv FOO: server rejected"`.
+
+**Errors:**
+- `"unknown host \"<name>\""` — name not in config
+- SSH handshake / knownhosts errors (see error-handling.md)
+
+**No PTY:** no MOTD, no ANSI escape sequences, no echo. Output is byte-for-byte what the process wrote.
+
+---
+
 ## ssh_session_open
 
 Opens a persistent PTY shell on the configured host.
@@ -13,12 +99,13 @@ Opens a persistent PTY shell on the configured host.
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
 | `host` | string | yes | Config key (e.g. `"prod-web"`). Not a raw IP or hostname. |
+| `name` | string | no | Client-supplied session name. Must match `^[a-z0-9][a-z0-9._-]{0,62}$`. Must not start with `s_`. |
 
 **Success:**
 ```json
 { "session_id": "s_XXXXXXXX" }
 ```
-Also returns text: `"Session opened: s_XXXXXXXX"`
+If `name` was supplied, `session_id` contains the client-supplied name instead of an auto-generated ID.
 
 **Errors:**
 - `"unknown host \"<name>\""` — name not in config
@@ -27,9 +114,9 @@ Also returns text: `"Session opened: s_XXXXXXXX"`
 - `"host \"<name>\": per-host session limit of N reached"` — max_sessions_per_host hit
 - `"manager is shutting down"`
 
-**Internals:** Allocates a PTY (`xterm-256color`, 40×120), requests a shell. Auth and
-known_hosts verification happen here — not on send. Connection is pooled per host (30 s
-idle timer after all sessions for that host are closed).
+**Internals:** Allocates a PTY (`dumb`, 40×120), requests a shell. Auth and known_hosts
+verification happen here — not on send. Connection is pooled per host (30 s idle timer after
+all sessions for that host are closed). MOTD is suppressed automatically on open.
 
 ---
 
@@ -40,22 +127,41 @@ Writes input to the shell's stdin and waits for output.
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
 | `session_id` | string | yes | From `ssh_session_open` |
-| `input` | string | yes | Pass `""` to poll without sending. Include `\n` to submit commands. |
-| `timeout_ms` | int | no | 0 → server default (2000 ms). Negative or > 86 400 000 → coerced to 0. Hard cap: 30 000 ms. |
+| `input` | string | yes | Command to send (include `\n`). Pass `""` to continue waiting for the in-flight command's marker. |
+| `timeout_ms` | int | no | 0 → server default (2 000 ms). Hard cap: 30 000 ms. Values above cap are clamped and reported via `warnings`. |
+| `raw` | bool | no | Default `false`. Pass `true` to skip marker injection, ANSI stripping, and echo removal. |
+| `wait_idle_ms` | int | no | Peek mode: return after this many ms of silence (TUI/REPL use). Mutually exclusive with non-empty `input`. |
 
 **Success:**
 ```json
-{ "output": "...", "truncated": false, "closed": false }
+{
+  "output": "...",
+  "exit_code": 0,
+  "still_running": false,
+  "truncated": false,
+  "closed_reason": "",
+  "warnings": []
+}
 ```
-- `output`: All bytes received during the quiesce window. Invalid UTF-8 → U+FFFD. ANSI codes preserved.
+
+- `output`: Clean text (echo/ANSI stripped) by default; raw bytes if `raw: true`.
+- `exit_code`: The shell exit code of the completed command. `nil`/absent when `still_running: true` or `raw: true`.
+- `still_running: true`: `timeout_ms` elapsed before the command completed. Send empty input to continue waiting.
 - `truncated: true`: Ring buffer (default 1 MiB) overflowed; oldest bytes lost.
-- `closed: true`: Remote shell has exited. Session is dead — close and open a new one.
+- `closed_reason`: Non-empty string means the session is dead. Values: `"exit"` `"lost"` `"idle"` `"max_age"` `"shutdown"`. Call `ssh_session_close` then open a new session.
+- `warnings`: Advisory messages, e.g. `"timeout_ms clamped from 60001 to 30000"`.
 
-**Returns when:** 50 ms of silence from remote (quiesce) OR `timeout_ms` elapsed OR context cancelled.
+**Returns when:** Completion marker received (default) OR `timeout_ms` elapsed OR context cancelled.
 
-**Errors:** `"session \"<id>\" not found"` (expired or already closed)
+**Errors:**
+- `"session \"<id>\" not found"` — expired or already closed
+- `"send in progress"` — attempted to send a new command while `still_running: true`
 
 **Note:** Send is serialised per session — concurrent sends to the same `session_id` are queued.
+
+**BREAKING from v1:** `closed: bool` removed — use `closed_reason != ""`. Empty input now
+continues waiting for the in-flight command's marker (not drain-idle). Use `wait_idle_ms` for
+the v1 peek behavior.
 
 ---
 
@@ -67,7 +173,10 @@ Closes a session and releases the connection pool slot.
 |---|---|---|---|
 | `session_id` | string | yes | |
 
-**Success:** text `"Session <id> closed."`
+**Success:**
+```json
+{ "closed_reason": "explicit" }
+```
 
 **Errors:** None (close is best-effort; calling on an already-closed session is safe).
 
@@ -88,13 +197,20 @@ No parameters.
   "sessions": [
     {
       "session_id": "s_XXXXXXXX",
+      "name": "mytest",
       "host": "prod-web",
       "opened_at": "2026-05-15T10:00:00Z",
-      "last_used_at": "2026-05-15T10:05:00Z"
+      "last_used_at": "2026-05-15T10:05:00Z",
+      "last_exit_code": 0,
+      "still_running": false
     }
   ]
 }
 ```
+
+- `name`: Client-supplied name if set on open; otherwise absent.
+- `last_exit_code`: Most recent `ssh_session_send` exit code.
+- `still_running`: `true` if a `Send` is currently in flight for this session.
 
 Use to identify leaked or stale sessions when approaching session limits or after
 unexpected "session not found" errors.
