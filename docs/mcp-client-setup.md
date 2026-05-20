@@ -32,7 +32,7 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop after saving. The seven rootcanal tools appear in the tool picker.
+Restart Claude Desktop after saving. The rootcanal tools appear in the tool picker.
 
 ## Claude CLI (MCP mode)
 
@@ -69,7 +69,7 @@ Ask the LLM:
 
 > *"List your available tools and tell me which ones are from rootcanal."*
 
-A working rootcanal installation will show `ssh_session_open`, `ssh_session_send`, `ssh_session_close`, `ssh_session_list`, `sftp_read`, `sftp_write`, and `sftp_list`.
+A working rootcanal installation will show `ssh_session_open`, `ssh_session_send`, `ssh_session_close`, `ssh_session_list`, `sftp_read`, `sftp_write`, `sftp_list`, `ssh_run_once`, `ssh_list_hosts`, and `ssh_host_capabilities`.
 
 ## Logs
 

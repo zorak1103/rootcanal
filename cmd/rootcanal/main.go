@@ -76,7 +76,7 @@ func main() {
 	mgr := session.NewManager(cfg, pool, log)
 	ops := sftpops.New(cfg, pool)
 
-	srv := mcpserver.New(mgr, ops, func(ss *mcp.ServerSession) {
+	srv := mcpserver.New(mgr, ops, cfg, func(ss *mcp.ServerSession) {
 		mcpH := mcp.NewLoggingHandler(ss, &mcp.LoggingHandlerOptions{
 			LoggerName:  "rootcanal",
 			MinInterval: 100 * time.Millisecond,

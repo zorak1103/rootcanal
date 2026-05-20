@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/Microsoft/go-winio v0.6.2
+	github.com/jimschubert/stripansi v0.0.1
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/pkg/sftp v1.13.10
 	github.com/testcontainers/testcontainers-go v0.42.0

@@ -14,6 +14,7 @@ import (
 
 type sessionOpenIn struct {
 	Host string `json:"host" jsonschema:"pre-declared host name from rootcanal config"`
+	Name string `json:"name,omitempty" jsonschema:"optional client-supplied session name"`
 }
 
 type sessionOpenOut struct {
@@ -22,7 +23,7 @@ type sessionOpenOut struct {
 
 func handleSessionOpen(mgr session.Manager) func(context.Context, *mcp.CallToolRequest, sessionOpenIn) (*mcp.CallToolResult, sessionOpenOut, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in sessionOpenIn) (*mcp.CallToolResult, sessionOpenOut, error) {
-		id, err := mgr.Open(ctx, in.Host)
+		id, err := mgr.Open(ctx, in.Host, in.Name)
 		if err != nil {
 			r, _, _ := toolErr(err)
 			return r, sessionOpenOut{}, nil
@@ -39,38 +40,44 @@ func handleSessionOpen(mgr session.Manager) func(context.Context, *mcp.CallToolR
 // ---- ssh_session_send ----
 
 type sessionSendIn struct {
-	SessionID string `json:"session_id" jsonschema:"session ID returned by ssh_session_open"`
-	Input     string `json:"input"      jsonschema:"text to write to the shell's stdin; include a trailing \\n to submit a command"`
-	TimeoutMs int    `json:"timeout_ms,omitempty" jsonschema:"max milliseconds to wait for output (default: server default, max: server max)"`
+	SessionID  string `json:"session_id"`
+	Input      string `json:"input"`
+	TimeoutMs  int    `json:"timeout_ms,omitempty"`
+	Raw        bool   `json:"raw,omitempty"          jsonschema:"skip echo/ANSI stripping and marker injection"`
+	WaitIdleMs int    `json:"wait_idle_ms,omitempty" jsonschema:"peek mode: return after this many ms of silence; mutually exclusive with input"`
 }
 
 type sessionSendOut struct {
-	Output    string `json:"output"               jsonschema:"text received from the shell since the last Send"`
-	Truncated bool   `json:"truncated,omitempty"  jsonschema:"true if output was dropped due to buffer overflow"`
-	Closed    bool   `json:"closed,omitempty"     jsonschema:"true if the remote shell has exited"`
+	Output       string   `json:"output"`
+	ExitCode     *int     `json:"exit_code,omitempty"`
+	StillRunning bool     `json:"still_running,omitempty"`
+	Truncated    bool     `json:"truncated,omitempty"`
+	ClosedReason string   `json:"closed_reason,omitempty"`
+	Warnings     []string `json:"warnings,omitempty"`
 }
 
 func handleSessionSend(mgr session.Manager) func(context.Context, *mcp.CallToolRequest, sessionSendIn) (*mcp.CallToolResult, sessionSendOut, error) {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in sessionSendIn) (*mcp.CallToolResult, sessionSendOut, error) {
-		const maxToolTimeoutMs = 24 * 60 * 60 * 1000 // 1 day; prevents int64 overflow on multiply
-		ms := in.TimeoutMs
-		if ms < 0 || ms > maxToolTimeoutMs {
-			ms = 0
-		}
-		timeout := time.Duration(ms) * time.Millisecond
-
-		raw, truncated, closed, err := mgr.Send(ctx, in.SessionID, []byte(in.Input), timeout)
+		res, err := mgr.Send(ctx, in.SessionID, session.SendInput{
+			Input:      in.Input,
+			TimeoutMs:  in.TimeoutMs,
+			Raw:        in.Raw,
+			WaitIdleMs: in.WaitIdleMs,
+		})
 		if err != nil {
 			r, _, _ := toolErr(err)
 			return r, sessionSendOut{}, nil
 		}
-
-		text := sanitizeOutput(raw)
-		out := sessionSendOut{Output: text, Truncated: truncated, Closed: closed}
+		out := sessionSendOut{
+			Output:       res.Output,
+			ExitCode:     res.ExitCode,
+			StillRunning: res.StillRunning,
+			Truncated:    res.Truncated,
+			ClosedReason: res.ClosedReason,
+			Warnings:     res.Warnings,
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				&mcp.TextContent{Text: text},
-			},
+			Content: []mcp.Content{&mcp.TextContent{Text: res.Output}},
 		}, out, nil
 	}
 }
@@ -81,16 +88,23 @@ type sessionCloseIn struct {
 	SessionID string `json:"session_id" jsonschema:"session ID to close"`
 }
 
-func handleSessionClose(mgr session.Manager) func(context.Context, *mcp.CallToolRequest, sessionCloseIn) (*mcp.CallToolResult, any, error) {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in sessionCloseIn) (*mcp.CallToolResult, any, error) {
-		if err := mgr.Close(ctx, in.SessionID); err != nil {
-			return toolErr(err)
+type sessionCloseOut struct {
+	ClosedReason string `json:"closed_reason"`
+}
+
+func handleSessionClose(mgr session.Manager) func(context.Context, *mcp.CallToolRequest, sessionCloseIn) (*mcp.CallToolResult, sessionCloseOut, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in sessionCloseIn) (*mcp.CallToolResult, sessionCloseOut, error) {
+		reason, err := mgr.Close(ctx, in.SessionID)
+		if err != nil {
+			r, _, _ := toolErr(err)
+			return r, sessionCloseOut{}, nil
 		}
+		out := sessionCloseOut{ClosedReason: reason}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
-				&mcp.TextContent{Text: "Session " + in.SessionID + " closed."},
+				&mcp.TextContent{Text: "Session " + in.SessionID + " closed (" + reason + ")."},
 			},
-		}, nil, nil
+		}, out, nil
 	}
 }
 
@@ -101,10 +115,13 @@ type sessionListOut struct {
 }
 
 type sessionSummary struct {
-	SessionID  string `json:"session_id"`
-	Host       string `json:"host"`
-	OpenedAt   string `json:"opened_at"`
-	LastUsedAt string `json:"last_used_at"`
+	SessionID    string `json:"session_id"`
+	Name         string `json:"name,omitempty"`
+	Host         string `json:"host"`
+	OpenedAt     string `json:"opened_at"`
+	LastUsedAt   string `json:"last_used_at"`
+	LastExitCode *int   `json:"last_exit_code,omitempty"`
+	StillRunning bool   `json:"still_running,omitempty"`
 }
 
 func handleSessionList(mgr session.Manager) func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, sessionListOut, error) {
@@ -113,10 +130,13 @@ func handleSessionList(mgr session.Manager) func(context.Context, *mcp.CallToolR
 		summaries := make([]sessionSummary, len(infos))
 		for i, info := range infos {
 			summaries[i] = sessionSummary{
-				SessionID:  info.ID,
-				Host:       info.Host,
-				OpenedAt:   info.OpenedAt.UTC().Format(time.RFC3339),
-				LastUsedAt: info.LastUsedAt.UTC().Format(time.RFC3339),
+				SessionID:    info.ID,
+				Name:         info.Name,
+				Host:         info.Host,
+				OpenedAt:     info.OpenedAt.UTC().Format(time.RFC3339),
+				LastUsedAt:   info.LastUsedAt.UTC().Format(time.RFC3339),
+				LastExitCode: info.LastExitCode,
+				StillRunning: info.StillRunning,
 			}
 		}
 		out := sessionListOut{Sessions: summaries}
@@ -125,6 +145,15 @@ func handleSessionList(mgr session.Manager) func(context.Context, *mcp.CallToolR
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, out, nil
 	}
+}
+
+// sanitizeOutput replaces invalid UTF-8 sequences with U+FFFD so the JSON
+// transport is always valid.
+func sanitizeOutput(raw []byte) string {
+	if utf8.Valid(raw) {
+		return string(raw)
+	}
+	return strings.ToValidUTF8(string(raw), "�")
 }
 
 func formatSessionList(ss []sessionSummary) string {
@@ -136,13 +165,4 @@ func formatSessionList(ss []sessionSummary) string {
 		b.WriteString(s.SessionID + "  " + s.Host + "  opened=" + s.OpenedAt + "\n")
 	}
 	return b.String()
-}
-
-// sanitizeOutput replaces invalid UTF-8 sequences so the JSON transport never
-// breaks. ANSI/control chars are preserved — the LLM handles them correctly.
-func sanitizeOutput(raw []byte) string {
-	if utf8.Valid(raw) {
-		return string(raw)
-	}
-	return strings.ToValidUTF8(string(raw), "�")
 }

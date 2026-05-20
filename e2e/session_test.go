@@ -35,13 +35,14 @@ func TestSession_ShellPromptVisible(t *testing.T) {
 		t.Fatalf("OpenSession failed: %s", msg)
 	}
 
-	// An empty newline triggers the prompt to appear in the output.
+	// v2 sets PS1='' to suppress the prompt for clean LLM output.
+	// Sending "\n" should still complete cleanly with ExitCode=0.
 	sr := h.Send(id, "\n", 2000)
 	if sr.IsError {
 		t.Fatalf("Send failed: %s", sr.ErrText)
 	}
-	if !strings.Contains(sr.Output, "$") && !strings.Contains(sr.Output, "#") {
-		t.Errorf("expected shell prompt ($ or #) in output, got: %q", sr.Output)
+	if sr.ExitCode == nil || *sr.ExitCode != 0 {
+		t.Errorf("ExitCode = %v, want &0", sr.ExitCode)
 	}
 }
 

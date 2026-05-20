@@ -33,6 +33,9 @@ MCP client ──(stdio MCP)──▶ rootcanal ──(SSH sessions)──▶ re
 | `sftp_read` | Read a remote file (UTF-8 or base64 for binary) — requires `sftp_enabled: true` on the host |
 | `sftp_write` | Write a remote file (base64 accepted for binary) — requires `sftp_enabled: true` on the host |
 | `sftp_list` | List a remote directory — requires `sftp_enabled: true` on the host |
+| `ssh_run_once` | Execute a single command via SSH exec channel (no PTY); returns stdout, stderr, exit_code |
+| `ssh_list_hosts` | List all pre-declared hosts with non-sensitive metadata (no credentials) |
+| `ssh_host_capabilities` | Return SSH/SFTP caps, session limits, and terminal settings for a host |
 
 ## Installation
 
@@ -42,7 +45,7 @@ Download the latest release for your platform from the [Releases page](https://g
 
 ```sh
 # Linux / macOS — extract and install
-tar -xzf rootcanal_v1.0.0_linux_amd64.tar.gz
+tar -xzf rootcanal_v2.0.0_linux_amd64.tar.gz
 sudo mv rootcanal /usr/local/bin/
 
 # Windows — extract rootcanal.exe from the zip and add to PATH
@@ -76,6 +79,10 @@ hosts:
     address: web1.example.com:22
     user: deploy
     known_hosts: ~/.ssh/known_hosts
+    description: "Production web server"          # optional label for ssh_list_hosts
+    idle_timeout: 10m                              # override global default_idle_timeout
+    term: dumb                                     # $TERM for this host (default: dumb)
+    clean_output: true                             # strip ANSI/echo (default: true)
     auth:
       type: key
       key_path: ~/.ssh/id_ed25519
@@ -175,19 +182,28 @@ Start-Service ssh-agent
 ssh-add $env:USERPROFILE\.ssh\id_ed25519
 ```
 
-PuTTY/Pageant are not supported in v1.0.0.
+PuTTY/Pageant are not supported; use the OpenSSH for Windows agent instead.
 
 ## Global limits (optional)
 
 ```yaml
 limits:
-  max_sessions_total:    32      # hard cap across all hosts
-  max_sessions_per_host:  4      # also limits concurrent SFTP ops
-  default_idle_timeout:  15m     # GC closes sessions unused this long
-  max_session_age:        4h     # GC closes sessions older than this
-  output_buffer_bytes:   1048576 # 1 MiB ring buffer per session
-  sftp_max_read_bytes:   5242880 # 5 MiB per sftp_read call
-  sftp_max_write_bytes: 26214400 # 25 MiB per sftp_write call
+  max_sessions_total:       32       # hard cap across all hosts
+  max_sessions_per_host:     4       # also limits concurrent SFTP ops
+  default_idle_timeout:     15m      # GC closes sessions unused this long
+  max_session_age:           4h      # GC closes sessions older than this
+  output_buffer_bytes:    1048576    # 1 MiB ring buffer per session
+  dial_timeout:             10s      # SSH TCP connect timeout
+  default_send_timeout_ms:  2000     # ssh_session_send default timeout
+  max_send_timeout_ms:     30000     # ssh_session_send hard cap
+  sftp_max_read_bytes:    5242880    # 5 MiB per sftp_read call
+  sftp_max_write_bytes:  26214400    # 25 MiB per sftp_write call
+  # v2.0 additions
+  default_term:          dumb        # $TERM advertised to remote shell
+  default_clean_output:  true        # strip ANSI/escape codes by default
+  run_once_max_bytes:    1048576     # 1 MiB cap per stream for ssh_run_once
+  run_once_max_timeout_ms: 60000     # ssh_run_once hard timeout cap
+  max_run_once_concurrent:  16       # concurrent ssh_run_once calls
 ```
 
 ## SFTP access control
@@ -211,9 +227,10 @@ Hosts without `sftp_enabled: true` have all `sftp_*` calls rejected, even if SFT
 
 ## Known limitations
 
-- Output framing is heuristic. `ssh_session_send` returns output received within a timeout after a 50 ms quiescence gap. It may split output across two calls for long-running commands; poll by calling `send` with empty input.
-- No `ssh_exec` (single-shot exec). Use `ssh_session_open` + `ssh_session_send` + `ssh_session_close` instead. The persistent session model handles `sudo` prompts and REPLs naturally.
-- No port forwarding in v1.0.0.
+- **Output framing uses sentinel markers.** `ssh_session_send` injects a `RC_EXIT_<nonce>_<code>` marker after each command and waits for it to appear in the output. For raw mode (`raw: true`) or REPL/TUI use, use `wait_idle_ms` instead; output is then returned after that many milliseconds of silence.
+- **Long-running commands:** If `timeout_ms` elapses before the marker arrives, `still_running: true` is returned. Send empty input to keep waiting.
+- **`ssh_run_once` vs persistent sessions:** Use `ssh_run_once` for one-shot reads (`df`, `cat`, `docker inspect`). Use `ssh_session_open` + `ssh_session_send` for interactive work, `sudo`, or REPLs that require PTY.
+- No port forwarding.
 - PuTTY/Pageant not supported on Windows: use OpenSSH for Windows agent.
 
 ## sudo and privilege escalation

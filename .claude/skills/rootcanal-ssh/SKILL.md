@@ -4,7 +4,9 @@ description: >
   SSH session management and SFTP file access via the rootcanal MCP server
   (tools: mcp__rootcanal__ssh_session_open, mcp__rootcanal__ssh_session_send,
   mcp__rootcanal__ssh_session_close, mcp__rootcanal__ssh_session_list,
-  mcp__rootcanal__sftp_read, mcp__rootcanal__sftp_write, mcp__rootcanal__sftp_list).
+  mcp__rootcanal__ssh_run_once, mcp__rootcanal__ssh_list_hosts,
+  mcp__rootcanal__ssh_host_capabilities, mcp__rootcanal__sftp_read,
+  mcp__rootcanal__sftp_write, mcp__rootcanal__sftp_list).
   Use whenever the user asks to: connect to an SSH host, run remote shell commands,
   check server state, read or write remote files, or whenever any mcp__rootcanal__*
   tool is involved. Hosts come from the config file; read it or ask the user.
@@ -15,8 +17,8 @@ description: >
 # rootcanal SSH
 
 rootcanal is a stdio MCP server for persistent PTY-based SSH sessions and SFTP file access.
-All 7 tools are restricted to hosts declared in the operator config — the LLM cannot supply
-raw addresses or ports. There is no single-shot exec; the canonical pattern is open → send → close.
+All 10 tools are restricted to hosts declared in the operator config — the LLM cannot supply
+raw addresses or ports.
 
 Respond to the user in whatever language they write in. Technical tool names stay in English.
 
@@ -24,27 +26,34 @@ Respond to the user in whatever language they write in. Technical tool names sta
 
 ## Host Discovery
 
-rootcanal has **no list-hosts tool**. Available hosts come from the config file.
+Call `ssh_list_hosts` to discover available hosts. Each entry includes name, address, user,
+auth_type, and sftp_enabled. No credentials are ever returned.
 
-**Config search order:**
-1. `./rootcanal.yaml`
-2. `$XDG_CONFIG_HOME/rootcanal/config.yaml`
-3. `$HOME/.config/rootcanal/config.yaml`
+To inspect limits and SFTP capabilities for a specific host, call `ssh_host_capabilities`.
 
-**Procedure:** Read the config file to extract host names, then verify with `ssh_session_open`.
-If the config path is unknown, ask the user.
+---
+
+## For One-shot Reads, Use `ssh_run_once`
+
+`ssh_run_once` is the right tool for any command that doesn't need session state (`df`, `ls`,
+`cat`, `docker inspect`).
+
+- No open/close ceremony — one call returns stdout, stderr, and exit_code.
+- No PTY: no MOTD, no ANSI, no echo. Output is byte-for-byte what the process wrote.
+- Requires a POSIX-compatible remote shell (`sh`, `bash`, `zsh`, `dash`, `busybox` — not `fish`/`csh`).
 
 ---
 
 ## Session Workflow
 
-Always follow this exact sequence:
+Use persistent sessions when you need interactive state (environment variables, working directory,
+long-running commands, TUI programs). Always follow this exact sequence:
 
 ```
-1. ssh_session_open(host)                       → { session_id }
-2. ssh_session_send(session_id, "cmd\n", ...)   → { output, truncated?, closed? }
-   (repeat with input="" to drain further output if needed)
-3. ssh_session_close(session_id)                → always, even after errors
+1. ssh_session_open(host)                         → { session_id }
+2. ssh_session_send(session_id, "cmd\n", ...)     → { output, exit_code?, still_running?, truncated?, closed_reason?, warnings? }
+   (repeat with input="" to continue waiting for an in-flight command)
+3. ssh_session_close(session_id)                  → always, even after errors
 ```
 
 **Trailing `\n` is required** — the shell does not execute without it.
@@ -63,27 +72,26 @@ session limits or after a "session not found" error.
 
 ---
 
-## Output Framing
+## Output Cleanliness
 
-Five facts to internalize before parsing any command output:
+1. **Returns when the completion marker arrives**, not on 50 ms quiescence. Output is deterministic.
+2. **Output is clean by default** — PTY echo, ANSI escapes, and the shell prompt are stripped.
+   Pass `raw: true` to receive unfiltered bytes.
 
-1. **Returns on quiesce, not on completion.** `ssh_session_send` returns after 50 ms of silence
-   from the remote, or when `timeout_ms` elapses — whichever comes first. Long-running commands
-   may return mid-output. Poll by calling `ssh_session_send(id, "")` (empty input) to drain.
+---
 
-2. **PTY echo is ON.** The input you sent appears at the start of output. Skip it when parsing —
-   look for the shell prompt (`$`, `#`, or the `user@host:~$` pattern) to find where your output begins.
+## Long-running Commands
 
-3. **ANSI codes are preserved.** Color, cursor-movement, and bold escape sequences remain in the
-   raw output. Filter with `grep -oP`, or prefer `--no-color` / `TERM=dumb` flags on the remote:
-   `git --no-pager log --oneline`, `ls --color=never`, `systemctl --no-pager status`.
+Use `still_running` + continuation to drive commands that exceed `timeout_ms`:
 
-4. **`truncated: true` = ring buffer overflow.** The 1 MiB per-session buffer was overrun;
-   oldest bytes are lost. Remediation: redirect output to a file on the remote and fetch via
-   `sftp_read`, or pipe through `head`/`tail`/`grep` before capture.
+```
+Send("./build.sh\n", timeout_ms=5000)  → { still_running: true, output: "..." }
+Send("", timeout_ms=60000)             → { exit_code: 0, output: "Build done." }
+```
 
-5. **`closed: true` = remote shell exited.** The session is dead. Still call `ssh_session_close`
-   (required to release the pool slot), then open a new session.
+Empty input with no `wait_idle_ms` continues waiting for the in-flight command's marker.
+Do NOT send a new command while `still_running: true` — you'll receive an error.
+For TUI peeking (vim, top), use `wait_idle_ms` instead of empty input.
 
 ---
 
@@ -94,8 +102,8 @@ Five facts to internalize before parsing any command output:
 - **Pass a sudo password in conversation or prompt context.** It travels to Anthropic's
   infrastructure in plaintext and may appear in conversation logs. See [references/sudo.md](references/sudo.md).
 
-- **Invent host names.** Only use names present in the config. An unknown name returns
-  `"unknown host \"<name>\""` — do not retry with guesses; ask the user.
+- **Invent host names.** Only use names present in the config or returned by `ssh_list_hosts`.
+  An unknown name returns `"unknown host \"<name>\""` — do not retry with guesses; ask the user.
 
 - **Blindly refresh known_hosts without verifying the cause.** A key mismatch means the server
   key changed. Before running `ssh-keygen -R` + `ssh-keyscan`, confirm with the user that the
@@ -107,6 +115,9 @@ Five facts to internalize before parsing any command output:
 - **Overwrite production files without user confirmation.** `sftp_write` is `O_TRUNC` — the
   original is gone immediately with no backup. Confirm destructive writes explicitly.
 
+- **Never send a new command while `still_running: true`.** Wait for the in-flight command to
+  complete first (send empty input).
+
 ---
 
 ## Limits Cheat Sheet
@@ -116,12 +127,15 @@ Five facts to internalize before parsing any command output:
 | Sessions total | 32 | Atomic cap across all hosts |
 | Sessions per host | 4 | Shared with SFTP operations |
 | Send timeout default | 2 000 ms | Override per-call with `timeout_ms` |
-| Send timeout max | 30 000 ms | Hard server cap; higher values silently clamped |
+| Send timeout max | 30 000 ms | Hard server cap; higher values reported via `warnings` |
+| run_once timeout max | 60 000 ms | Hard server cap; higher values reported via `warnings` |
 | Output buffer | 1 MiB / session | Ring buffer; overflow → `truncated: true` |
+| run_once stdout/stderr cap | 1 MiB each | `truncated: true` if either stream hits the cap |
 | SFTP read limit | 5 MiB | **Silent truncation — no `truncated` flag on sftp_read!** |
 | SFTP write limit | 25 MiB | Server-side rejection before any I/O |
 | Idle timeout | 15 min | GC closes unused sessions |
 | Max session age | 4 h | GC closes regardless of activity |
+| `closed_reason` values | `"exit"` `"lost"` `"idle"` `"max_age"` `"shutdown"` `"explicit"` | Non-empty = session is dead |
 | Pool idle (after close) | 30 s | Underlying SSH client lingers briefly |
 
 ---

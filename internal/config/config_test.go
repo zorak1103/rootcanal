@@ -592,6 +592,88 @@ func TestValidate_SFTPPrefix_UncleanRejected(t *testing.T) {
 	}
 }
 
+func TestCapabilities(t *testing.T) {
+	cfg := &Config{
+		Limits: Limits{MaxSessionAge: 4 * time.Hour},
+		Hosts: map[string]Host{
+			"mynas": {
+				IdleTimeout:         15 * time.Minute,
+				SFTPEnabled:         true,
+				SFTPAllowedPrefixes: []string{"/data"},
+			},
+		},
+	}
+	got, err := cfg.Capabilities("mynas")
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if !got.SSH {
+		t.Error("SSH should be true")
+	}
+	if !got.SFTP {
+		t.Error("SFTP should be true")
+	}
+	if len(got.SFTPAllowedPrefixes) != 1 || got.SFTPAllowedPrefixes[0] != "/data" {
+		t.Errorf("SFTPAllowedPrefixes = %v", got.SFTPAllowedPrefixes)
+	}
+	if got.IdleTimeoutMs != (15 * time.Minute).Milliseconds() {
+		t.Errorf("IdleTimeoutMs = %d", got.IdleTimeoutMs)
+	}
+	if got.MaxSessionAgeMs != (4 * time.Hour).Milliseconds() {
+		t.Errorf("MaxSessionAgeMs = %d", got.MaxSessionAgeMs)
+	}
+
+	_, err = cfg.Capabilities("unknown")
+	if err == nil {
+		t.Error("expected error for unknown host")
+	}
+}
+
+func TestApplyDefaults_NewV2Fields(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+
+	if cfg.Limits.DefaultTerm != defaultDefaultTerm {
+		t.Errorf("DefaultTerm = %q, want %q", cfg.Limits.DefaultTerm, defaultDefaultTerm)
+	}
+	if cfg.Limits.DefaultCleanOutput == nil || !*cfg.Limits.DefaultCleanOutput {
+		t.Error("DefaultCleanOutput should default to true")
+	}
+	if cfg.Limits.RunOnceMaxBytes != defaultRunOnceMaxBytes {
+		t.Errorf("RunOnceMaxBytes = %d, want %d", cfg.Limits.RunOnceMaxBytes, defaultRunOnceMaxBytes)
+	}
+	if cfg.Limits.RunOnceMaxTimeoutMs != defaultRunOnceMaxTimeoutMs {
+		t.Errorf("RunOnceMaxTimeoutMs = %d, want %d", cfg.Limits.RunOnceMaxTimeoutMs, defaultRunOnceMaxTimeoutMs)
+	}
+	if cfg.Limits.MaxRunOnceConcurrent != defaultMaxRunOnceConcurrent {
+		t.Errorf("MaxRunOnceConcurrent = %d, want %d", cfg.Limits.MaxRunOnceConcurrent, defaultMaxRunOnceConcurrent)
+	}
+}
+
+func TestCapabilities_TermAndCleanOutput(t *testing.T) {
+	clean := true
+	cfg := &Config{
+		Limits: Limits{MaxSessionAge: time.Hour},
+		Hosts: map[string]Host{
+			"h": {
+				IdleTimeout: time.Minute,
+				Term:        "xterm-256color",
+				CleanOutput: &clean,
+			},
+		},
+	}
+	got, err := cfg.Capabilities("h")
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if got.Term != "xterm-256color" {
+		t.Errorf("Term = %q, want xterm-256color", got.Term)
+	}
+	if got.CleanOutput == nil || !*got.CleanOutput {
+		t.Error("CleanOutput should be &true")
+	}
+}
+
 func TestLoad_SFTPFields_RoundTrip(t *testing.T) {
 	kh, _ := validHostCfg(t)
 	yaml := fmt.Sprintf(`

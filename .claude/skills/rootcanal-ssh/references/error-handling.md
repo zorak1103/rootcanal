@@ -67,10 +67,40 @@ or reached `max_session_age` (4 h default).
 
 ---
 
-### `closed: true` in ssh_session_send response
-**Cause:** The remote shell process exited (command error, explicit `exit`, or disconnect).
-This is a **flag in the success response** — not an `IsError` error.
+### `closed_reason` non-empty in ssh_session_send response
+**Cause:** The remote shell process exited (command error, explicit `exit`, disconnect, GC eviction, or shutdown).
+This is a **field in the success response** — not an `IsError` error. Values: `"exit"` `"lost"` `"idle"` `"max_age"` `"shutdown"`.
 **Fix:** Still call `ssh_session_close` (required to release the pool slot), then open a new session.
+
+---
+
+### `"command still in flight; send empty input to continue waiting"`
+**Cause:** A `send` with non-empty input was attempted while the session has a marker-awaited command still running (`still_running: true`).
+**Fix:** Send empty input (`""`) to continue waiting for the in-flight command's result. Do not send a new command until `still_running: false` is returned.
+
+---
+
+### `"input and wait_idle_ms are mutually exclusive"`
+**Cause:** Both a non-empty `input` and `wait_idle_ms > 0` were provided in the same `ssh_session_send` call.
+**Fix:** Use either `input` (command mode) or `wait_idle_ms` (peek/idle mode), not both simultaneously.
+
+---
+
+### `"run_once: no pool configured"`
+**Cause:** Internal — `Manager` was created without a host pool (test/mock setup). Not expected in production.
+
+---
+
+### `"opening exec session on \"<host>\": ..."`
+**Cause:** The SSH exec channel could not be opened — usually a server-side restriction (e.g. `ForceCommand`, `AllowTcpForwarding no`).
+**Fix:** Verify the remote `sshd_config` allows exec sessions for the auth'd user.
+
+---
+
+### `warnings` in ssh_session_send / ssh_run_once responses
+Advisory messages that do not indicate failure. Common values:
+- `"timeout_ms clamped from X to Y"` — requested timeout exceeded the server cap.
+- `"setenv K: server rejected"` — the remote `sshd_config` `AcceptEnv` policy blocked the variable.
 
 ---
 
