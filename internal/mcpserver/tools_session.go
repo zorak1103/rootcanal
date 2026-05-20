@@ -147,6 +147,15 @@ func handleSessionList(mgr session.Manager) func(context.Context, *mcp.CallToolR
 	}
 }
 
+// sanitizeOutput replaces invalid UTF-8 sequences with U+FFFD so the JSON
+// transport is always valid.
+func sanitizeOutput(raw []byte) string {
+	if utf8.Valid(raw) {
+		return string(raw)
+	}
+	return strings.ToValidUTF8(string(raw), "�")
+}
+
 func formatSessionList(ss []sessionSummary) string {
 	if len(ss) == 0 {
 		return "No open sessions."
@@ -156,13 +165,4 @@ func formatSessionList(ss []sessionSummary) string {
 		b.WriteString(s.SessionID + "  " + s.Host + "  opened=" + s.OpenedAt + "\n")
 	}
 	return b.String()
-}
-
-// sanitizeOutput replaces invalid UTF-8 sequences so the JSON transport never
-// breaks. ANSI/control chars are preserved — the LLM handles them correctly.
-func sanitizeOutput(raw []byte) string {
-	if utf8.Valid(raw) {
-		return string(raw)
-	}
-	return strings.ToValidUTF8(string(raw), "")
 }

@@ -207,6 +207,9 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	}
 
 	id := newSessionID()
+	if name != "" {
+		id = name
+	}
 	s.id = id
 
 	m.mu.Lock()
@@ -383,7 +386,17 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 	s.lastUsedAt = time.Now()
 	s.mu.Unlock()
 
-	cmd := fmt.Sprintf("%s; printf '\\nRC_EXIT_%s_%%d\\n' $?\n", in.Input, nonce)
+	// Strip trailing newlines before appending the marker printf so that the
+	// semicolon never lands at the start of a new shell line (bash syntax error).
+	trimmed := strings.TrimRight(in.Input, "\r\n")
+	var cmd string
+	if trimmed == "" {
+		// Whitespace-only input: emit just the marker so the caller gets a clean
+		// sync point (exit code 0) without touching the shell state.
+		cmd = fmt.Sprintf("printf '\\nRC_EXIT_%s_0\\n'\n", nonce)
+	} else {
+		cmd = fmt.Sprintf("%s; printf '\\nRC_EXIT_%s_%%d\\n' $?\n", trimmed, nonce)
+	}
 	ch := make(chan error, 1)
 	go func() { _, err := s.stdin.Write([]byte(cmd)); ch <- err }()
 	select {

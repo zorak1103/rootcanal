@@ -3,6 +3,8 @@ package session
 import (
 	"bytes"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/jimschubert/stripansi"
 )
@@ -19,12 +21,16 @@ func stripANSI(b []byte) []byte {
 	return stripansi.Bytes(b)
 }
 
-// cleanOutput strips ANSI escape sequences and normalises \r\n and bare \r to \n.
-// It does not mutate b.
+// cleanOutput strips ANSI escape sequences, normalises \r\n and bare \r to \n,
+// and replaces invalid UTF-8 sequences with U+FFFD so the JSON transport is
+// always valid. It does not mutate b.
 func cleanOutput(b []byte) []byte {
 	b = oscSequence.ReplaceAll(b, nil)
 	b = stripansi.Bytes(b)
 	b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 	b = bytes.ReplaceAll(b, []byte("\r"), []byte("\n"))
+	if !utf8.Valid(b) {
+		return []byte(strings.ToValidUTF8(string(b), "�"))
+	}
 	return b
 }
