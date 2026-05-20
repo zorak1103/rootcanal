@@ -41,6 +41,12 @@ type Limits struct {
 	MaxSendTimeoutMs     int           `yaml:"max_send_timeout_ms"`
 	SFTPMaxReadBytes     int           `yaml:"sftp_max_read_bytes"`
 	SFTPMaxWriteBytes    int           `yaml:"sftp_max_write_bytes"`
+	// v2.0 additions
+	DefaultTerm          string `yaml:"default_term,omitempty"`
+	DefaultCleanOutput   *bool  `yaml:"default_clean_output,omitempty"`
+	RunOnceMaxBytes      int64  `yaml:"run_once_max_bytes,omitempty"`
+	RunOnceMaxTimeoutMs  int    `yaml:"run_once_max_timeout_ms,omitempty"`
+	MaxRunOnceConcurrent int    `yaml:"max_run_once_concurrent,omitempty"`
 }
 
 // Host is a pre-declared SSH target.
@@ -53,6 +59,9 @@ type Host struct {
 	Description         string        `yaml:"description,omitempty"`
 	SFTPEnabled         bool          `yaml:"sftp_enabled,omitempty"`
 	SFTPAllowedPrefixes []string      `yaml:"sftp_allowed_prefixes,omitempty"`
+	// v2.0 additions
+	Term        string `yaml:"term,omitempty"`
+	CleanOutput *bool  `yaml:"clean_output,omitempty"`
 }
 
 // Auth specifies how to authenticate to a host.
@@ -126,6 +135,22 @@ func applyDefaults(cfg *Config) {
 	}
 	if l.SFTPMaxWriteBytes == 0 {
 		l.SFTPMaxWriteBytes = defaultSFTPMaxWriteBytes
+	}
+	if l.DefaultTerm == "" {
+		l.DefaultTerm = "dumb"
+	}
+	if l.DefaultCleanOutput == nil {
+		t := true
+		l.DefaultCleanOutput = &t
+	}
+	if l.RunOnceMaxBytes == 0 {
+		l.RunOnceMaxBytes = 1 << 20 // 1 MiB
+	}
+	if l.RunOnceMaxTimeoutMs == 0 {
+		l.RunOnceMaxTimeoutMs = 60000 // 60 s
+	}
+	if l.MaxRunOnceConcurrent == 0 {
+		l.MaxRunOnceConcurrent = 16
 	}
 
 	for name, h := range cfg.Hosts {

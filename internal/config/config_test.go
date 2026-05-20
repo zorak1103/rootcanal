@@ -592,6 +592,64 @@ func TestValidate_SFTPPrefix_UncleanRejected(t *testing.T) {
 	}
 }
 
+func TestCapabilities(t *testing.T) {
+	cfg := &Config{
+		Limits: Limits{MaxSessionAge: 4 * time.Hour},
+		Hosts: map[string]Host{
+			"mynas": {
+				IdleTimeout:         15 * time.Minute,
+				SFTPEnabled:         true,
+				SFTPAllowedPrefixes: []string{"/data"},
+			},
+		},
+	}
+	got, err := cfg.Capabilities("mynas")
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if !got.SSH {
+		t.Error("SSH should be true")
+	}
+	if !got.SFTP {
+		t.Error("SFTP should be true")
+	}
+	if len(got.SFTPAllowedPrefixes) != 1 || got.SFTPAllowedPrefixes[0] != "/data" {
+		t.Errorf("SFTPAllowedPrefixes = %v", got.SFTPAllowedPrefixes)
+	}
+	if got.IdleTimeoutMs != (15 * time.Minute).Milliseconds() {
+		t.Errorf("IdleTimeoutMs = %d", got.IdleTimeoutMs)
+	}
+	if got.MaxSessionAgeMs != (4 * time.Hour).Milliseconds() {
+		t.Errorf("MaxSessionAgeMs = %d", got.MaxSessionAgeMs)
+	}
+
+	_, err = cfg.Capabilities("unknown")
+	if err == nil {
+		t.Error("expected error for unknown host")
+	}
+}
+
+func TestApplyDefaults_NewV2Fields(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+
+	if cfg.Limits.DefaultTerm != "dumb" {
+		t.Errorf("DefaultTerm = %q, want %q", cfg.Limits.DefaultTerm, "dumb")
+	}
+	if cfg.Limits.DefaultCleanOutput == nil || !*cfg.Limits.DefaultCleanOutput {
+		t.Error("DefaultCleanOutput should default to true")
+	}
+	if cfg.Limits.RunOnceMaxBytes != 1<<20 {
+		t.Errorf("RunOnceMaxBytes = %d, want %d", cfg.Limits.RunOnceMaxBytes, 1<<20)
+	}
+	if cfg.Limits.RunOnceMaxTimeoutMs != 60000 {
+		t.Errorf("RunOnceMaxTimeoutMs = %d, want 60000", cfg.Limits.RunOnceMaxTimeoutMs)
+	}
+	if cfg.Limits.MaxRunOnceConcurrent != 16 {
+		t.Errorf("MaxRunOnceConcurrent = %d, want 16", cfg.Limits.MaxRunOnceConcurrent)
+	}
+}
+
 func TestLoad_SFTPFields_RoundTrip(t *testing.T) {
 	kh, _ := validHostCfg(t)
 	yaml := fmt.Sprintf(`
