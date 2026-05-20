@@ -119,7 +119,7 @@ func TestToolsList(t *testing.T) {
 }
 
 func TestToolsList_NoCfg(t *testing.T) {
-	// Without a config, only the 7 core tools (session + SFTP) should be registered.
+	// Without a config, the 8 core tools (session + SFTP + ssh_run_once) should be registered.
 	mgr := &fakeManager{
 		listFn: func() []session.SessionInfo { return nil },
 	}
@@ -708,7 +708,6 @@ func TestHostCapabilities_UnknownHost(t *testing.T) {
 }
 
 func TestRunOnceTool(t *testing.T) {
-	ec := 0
 	mgr := &fakeManager{
 		openFn: func(_ context.Context, _, _ string) (string, error) { return "", nil },
 		sendFn: func(_ context.Context, _ string, _ session.SendInput) (session.SendResult, error) {
@@ -719,7 +718,7 @@ func TestRunOnceTool(t *testing.T) {
 		runOnceFn: func(_ context.Context, host string, in session.RunOnceInput) (session.RunOnceOutput, error) {
 			return session.RunOnceOutput{
 				Stdout:   "total 0\n",
-				ExitCode: ec,
+				ExitCode: 0,
 			}, nil
 		},
 	}
