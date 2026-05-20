@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
 	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
 	"gitlab.com/zorak1103/rootcanal/internal/version"
@@ -11,9 +12,11 @@ import (
 
 // New builds a configured *mcp.Server with all session and SFTP tools registered.
 //
+// cfg, if non-nil, enables the discovery tools (ssh_list_hosts, ssh_host_capabilities).
+//
 // onInitialized, if non-nil, is called once the MCP session handshake completes
 // so the caller can swap in an mcp.NewLoggingHandler to route logs to the client.
-func New(mgr session.Manager, ops sftpops.Ops, onInitialized func(*mcp.ServerSession)) *mcp.Server {
+func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, onInitialized func(*mcp.ServerSession)) *mcp.Server {
 	opts := &mcp.ServerOptions{}
 	if onInitialized != nil {
 		opts.InitializedHandler = func(_ context.Context, req *mcp.InitializedRequest) {
@@ -62,6 +65,19 @@ func New(mgr session.Manager, ops sftpops.Ops, onInitialized func(*mcp.ServerSes
 		Name:        "sftp_list",
 		Description: "List the contents of a directory on a remote host via SFTP.",
 	}, handleSFTPList(ops))
+
+	// Discovery tools (available when cfg is provided)
+	if cfg != nil {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "ssh_list_hosts",
+			Description: "List all pre-declared SSH hosts with their non-sensitive metadata (name, address, user, auth type, SFTP status). Credentials and key paths are never included.",
+		}, handleListHosts(cfg))
+
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "ssh_host_capabilities",
+			Description: "Return what rootcanal can do on a specific host: SSH, SFTP, allowed SFTP path prefixes, session idle timeout, and terminal/output settings.",
+		}, handleHostCapabilities(cfg))
+	}
 
 	return srv
 }

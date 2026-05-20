@@ -35,7 +35,7 @@ func TestSFTPWrite_SpecialModeBitsRejected(t *testing.T) {
 					return nil
 				},
 			}
-			sess := newTestClient(t, nil, ops)
+			sess := newTestClient(t, nil, ops, nil)
 
 			args := map[string]any{
 				"host":    "any",

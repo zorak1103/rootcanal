@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
 	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
@@ -64,9 +65,9 @@ func (f *fakeOps) List(ctx context.Context, host, path string) ([]sftpops.Entry,
 
 // ---- test helpers ----
 
-func newTestClient(t *testing.T, mgr session.Manager, ops sftpops.Ops) *mcp.ClientSession {
+func newTestClient(t *testing.T, mgr session.Manager, ops sftpops.Ops, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, ops, nil)
+	srv := mcpserver.New(mgr, ops, cfg, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,7 +90,8 @@ func TestToolsList(t *testing.T) {
 	mgr := &fakeManager{
 		listFn: func() []session.SessionInfo { return nil },
 	}
-	sess := newTestClient(t, mgr, nil)
+	cfg := &config.Config{Hosts: map[string]config.Host{"h": {}}}
+	sess := newTestClient(t, mgr, nil, cfg)
 
 	result, err := sess.ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
@@ -103,10 +105,15 @@ func TestToolsList(t *testing.T) {
 	for _, expected := range []string{
 		"ssh_session_open", "ssh_session_send",
 		"ssh_session_close", "ssh_session_list",
+		"sftp_read", "sftp_write", "sftp_list",
+		"ssh_list_hosts", "ssh_host_capabilities",
 	} {
 		if !names[expected] {
 			t.Errorf("missing tool %q", expected)
 		}
+	}
+	if got := len(result.Tools); got != 9 {
+		t.Errorf("expected 9 tools, got %d", got)
 	}
 }
 
@@ -116,7 +123,7 @@ func TestTool_SessionOpen_Success(t *testing.T) {
 			return "s_TEST01", nil
 		},
 	}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_open",
@@ -141,7 +148,7 @@ func TestTool_SessionOpen_Error(t *testing.T) {
 			return "", context.DeadlineExceeded
 		},
 	}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_open",
@@ -161,7 +168,7 @@ func TestTool_SessionSend(t *testing.T) {
 			return session.SendResult{Output: "$ " + in.Input}, nil
 		},
 	}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_send",
@@ -183,7 +190,7 @@ func TestTool_SessionClose(t *testing.T) {
 			return "explicit", nil
 		},
 	}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_close",
@@ -206,7 +213,7 @@ func TestTool_SessionSend_Error(t *testing.T) {
 			return session.SendResult{}, errors.New("session gone")
 		},
 	}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_send",
@@ -226,7 +233,7 @@ func TestTool_SessionClose_Error(t *testing.T) {
 			return "", errors.New("session not found")
 		},
 	}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_close",
@@ -242,7 +249,7 @@ func TestTool_SessionClose_Error(t *testing.T) {
 
 func TestTool_SessionList_Empty(t *testing.T) {
 	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_list",
@@ -265,7 +272,7 @@ func TestTool_SessionList(t *testing.T) {
 			}
 		},
 	}
-	sess := newTestClient(t, mgr, nil)
+	sess := newTestClient(t, mgr, nil, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ssh_session_list",
@@ -291,7 +298,7 @@ func TestTool_SFTPRead_Text(t *testing.T) {
 			return []byte("hello world\n"), false, nil
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_read",
@@ -315,7 +322,7 @@ func TestTool_SFTPRead_Error(t *testing.T) {
 			return nil, false, errors.New("file not found")
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_read",
@@ -337,7 +344,7 @@ func TestTool_SFTPWrite_Success(t *testing.T) {
 			return nil
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_write",
@@ -360,7 +367,7 @@ func TestTool_SFTPWrite_InvalidMode(t *testing.T) {
 			return nil
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_write",
@@ -380,7 +387,7 @@ func TestTool_SFTPRead_Binary(t *testing.T) {
 			return []byte{0x00, 0x01, 0x02}, true, nil // binary data
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_read",
@@ -406,7 +413,7 @@ func TestTool_SFTPWrite_Binary(t *testing.T) {
 			return nil
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	// "hello" base64-encoded = "aGVsbG8="
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
@@ -430,7 +437,7 @@ func TestTool_SFTPWrite_BadBase64(t *testing.T) {
 	ops := &fakeOps{
 		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "sftp_write",
@@ -452,7 +459,7 @@ func TestTool_SFTPList_Error(t *testing.T) {
 			return nil, errors.New("permission denied")
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_list",
@@ -472,7 +479,7 @@ func TestTool_SFTPList_Empty(t *testing.T) {
 			return []sftpops.Entry{}, nil
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_list",
@@ -495,7 +502,7 @@ func TestTool_SFTPList_Success(t *testing.T) {
 			}, nil
 		},
 	}
-	sess := newTestClient(t, &fakeManager{}, ops)
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
 	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "sftp_list",
@@ -517,7 +524,7 @@ func TestOnInitialized_IsCalled(t *testing.T) {
 	called := make(chan struct{}, 1)
 	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
 
-	srv := mcpserver.New(mgr, nil, func(_ *mcp.ServerSession) {
+	srv := mcpserver.New(mgr, nil, nil, func(_ *mcp.ServerSession) {
 		called <- struct{}{}
 	})
 	t1, t2 := mcp.NewInMemoryTransports()
@@ -539,6 +546,137 @@ func TestOnInitialized_IsCalled(t *testing.T) {
 		// onInitialized was invoked as expected
 	case <-time.After(2 * time.Second):
 		t.Error("onInitialized callback was not called within 2s")
+	}
+}
+
+func TestListHosts(t *testing.T) {
+	cfg := &config.Config{
+		Hosts: map[string]config.Host{
+			"mynas": {
+				Address:     "nas.local:22",
+				User:        "admin",
+				Description: "Home NAS",
+				Auth:        config.Auth{Type: "key"},
+				SFTPEnabled: true,
+			},
+		},
+	}
+	mgr := &fakeManager{
+		openFn: func(_ context.Context, _, _ string) (string, error) { return "", nil },
+		sendFn: func(_ context.Context, _ string, _ session.SendInput) (session.SendResult, error) {
+			return session.SendResult{}, nil
+		},
+		closeFn: func(_ context.Context, _ string) (string, error) { return "", nil },
+		listFn:  func() []session.SessionInfo { return nil },
+	}
+	sess := newTestClient(t, mgr, &fakeOps{
+		readFn:  func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) { return nil, false, nil },
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+		listFn:  func(_ context.Context, _, _ string) ([]sftpops.Entry, error) { return nil, nil },
+	}, cfg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ssh_list_hosts",
+	})
+	if err != nil {
+		t.Fatalf("ssh_list_hosts: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool error: %v", res.Content)
+	}
+
+	var out struct {
+		Hosts []struct {
+			Name        string `json:"name"`
+			AuthType    string `json:"auth_type"`
+			SFTPEnabled bool   `json:"sftp_enabled"`
+		} `json:"hosts"`
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(out.Hosts) != 1 || out.Hosts[0].Name != "mynas" {
+		t.Errorf("hosts = %+v", out.Hosts)
+	}
+	if out.Hosts[0].AuthType != "key" {
+		t.Errorf("auth_type = %q, want key", out.Hosts[0].AuthType)
+	}
+	if !out.Hosts[0].SFTPEnabled {
+		t.Error("sftp_enabled should be true")
+	}
+}
+
+func TestHostCapabilities(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{MaxSessionAge: 4 * time.Hour},
+		Hosts: map[string]config.Host{
+			"mynas": {
+				IdleTimeout:         15 * time.Minute,
+				SFTPEnabled:         true,
+				SFTPAllowedPrefixes: []string{"/data"},
+			},
+		},
+	}
+	mgr := &fakeManager{
+		openFn: func(_ context.Context, _, _ string) (string, error) { return "", nil },
+		sendFn: func(_ context.Context, _ string, _ session.SendInput) (session.SendResult, error) {
+			return session.SendResult{}, nil
+		},
+		closeFn: func(_ context.Context, _ string) (string, error) { return "", nil },
+		listFn:  func() []session.SessionInfo { return nil },
+	}
+	sess := newTestClient(t, mgr, &fakeOps{
+		readFn:  func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) { return nil, false, nil },
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+		listFn:  func(_ context.Context, _, _ string) ([]sftpops.Entry, error) { return nil, nil },
+	}, cfg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_host_capabilities",
+		Arguments: map[string]any{"host": "mynas"},
+	})
+	if err != nil {
+		t.Fatalf("ssh_host_capabilities: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool error: %v", res.Content)
+	}
+
+	var out struct {
+		SSH  bool `json:"ssh"`
+		SFTP bool `json:"sftp"`
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !out.SSH {
+		t.Error("SSH should be true")
+	}
+	if !out.SFTP {
+		t.Error("SFTP should be true")
+	}
+}
+
+func TestHostCapabilities_UnknownHost(t *testing.T) {
+	cfg := &config.Config{
+		Hosts: map[string]config.Host{
+			"known": {},
+		},
+	}
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, cfg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_host_capabilities",
+		Arguments: map[string]any{"host": "unknown-host"},
+	})
+	if err != nil {
+		t.Fatalf("protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for unknown host")
 	}
 }
 
