@@ -26,9 +26,16 @@ func (s *realSSHSession) setOutput(w io.Writer) {
 	s.Stderr = w
 }
 
+// inflight tracks a running command whose exit-marker has not been received yet.
+type inflight struct {
+	nonce string
+	input string // original user input, used for echo stripping
+}
+
 // session holds state for one persistent shell session.
 type session struct {
 	id          string
+	name        string // optional client-supplied name
 	host        string
 	sshSess     sshSession
 	stdin       io.WriteCloser
@@ -36,10 +43,14 @@ type session struct {
 	openedAt    time.Time
 	done        chan struct{} // closed when remote shell exits
 
-	sendMu     sync.Mutex // serialises Send calls
-	mu         sync.Mutex // guards: closed, lastUsedAt
-	closed     bool
-	lastUsedAt time.Time
+	sendMu sync.Mutex // serialises Send calls
+	mu     sync.Mutex // guards: closed, closedReason, lastUsedAt, inflight, lastExitCode
+
+	closed       bool
+	closedReason string
+	lastUsedAt   time.Time
+	inflight     *inflight
+	lastExitCode *int
 
 	out *ringBuf
 }

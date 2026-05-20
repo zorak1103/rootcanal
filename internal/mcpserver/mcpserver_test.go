@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -18,22 +19,29 @@ import (
 // ---- fake Manager ----
 
 type fakeManager struct {
-	openFn  func(ctx context.Context, host string) (string, error)
-	sendFn  func(ctx context.Context, id string, input []byte, timeout time.Duration) ([]byte, bool, bool, error)
-	closeFn func(ctx context.Context, id string) error
-	listFn  func() []session.SessionInfo
+	openFn    func(ctx context.Context, host, name string) (string, error)
+	sendFn    func(ctx context.Context, id string, in session.SendInput) (session.SendResult, error)
+	closeFn   func(ctx context.Context, id string) (string, error)
+	listFn    func() []session.SessionInfo
+	runOnceFn func(ctx context.Context, host string, in session.RunOnceInput) (session.RunOnceOutput, error)
 }
 
-func (f *fakeManager) Open(ctx context.Context, host string) (string, error) {
-	return f.openFn(ctx, host)
+func (f *fakeManager) Open(ctx context.Context, host, name string) (string, error) {
+	return f.openFn(ctx, host, name)
 }
-func (f *fakeManager) Send(ctx context.Context, id string, input []byte, timeout time.Duration) ([]byte, bool, bool, error) {
-	return f.sendFn(ctx, id, input, timeout)
+func (f *fakeManager) Send(ctx context.Context, id string, in session.SendInput) (session.SendResult, error) {
+	return f.sendFn(ctx, id, in)
 }
-func (f *fakeManager) Close(ctx context.Context, id string) error {
+func (f *fakeManager) Close(ctx context.Context, id string) (string, error) {
 	return f.closeFn(ctx, id)
 }
-func (f *fakeManager) List() []session.SessionInfo      { return f.listFn() }
+func (f *fakeManager) List() []session.SessionInfo { return f.listFn() }
+func (f *fakeManager) RunOnce(ctx context.Context, host string, in session.RunOnceInput) (session.RunOnceOutput, error) {
+	if f.runOnceFn != nil {
+		return f.runOnceFn(ctx, host, in)
+	}
+	return session.RunOnceOutput{}, fmt.Errorf("RunOnce not configured")
+}
 func (f *fakeManager) Shutdown(_ context.Context) error { return nil }
 
 // ---- fake Ops ----
@@ -104,7 +112,7 @@ func TestToolsList(t *testing.T) {
 
 func TestTool_SessionOpen_Success(t *testing.T) {
 	mgr := &fakeManager{
-		openFn: func(_ context.Context, host string) (string, error) {
+		openFn: func(_ context.Context, host, name string) (string, error) {
 			return "s_TEST01", nil
 		},
 	}
@@ -129,7 +137,7 @@ func TestTool_SessionOpen_Success(t *testing.T) {
 
 func TestTool_SessionOpen_Error(t *testing.T) {
 	mgr := &fakeManager{
-		openFn: func(_ context.Context, host string) (string, error) {
+		openFn: func(_ context.Context, host, name string) (string, error) {
 			return "", context.DeadlineExceeded
 		},
 	}
@@ -149,8 +157,8 @@ func TestTool_SessionOpen_Error(t *testing.T) {
 
 func TestTool_SessionSend(t *testing.T) {
 	mgr := &fakeManager{
-		sendFn: func(_ context.Context, id string, input []byte, _ time.Duration) ([]byte, bool, bool, error) {
-			return []byte("$ " + string(input)), false, false, nil
+		sendFn: func(_ context.Context, id string, in session.SendInput) (session.SendResult, error) {
+			return session.SendResult{Output: "$ " + in.Input}, nil
 		},
 	}
 	sess := newTestClient(t, mgr, nil)
@@ -170,9 +178,9 @@ func TestTool_SessionSend(t *testing.T) {
 func TestTool_SessionClose(t *testing.T) {
 	closed := false
 	mgr := &fakeManager{
-		closeFn: func(_ context.Context, id string) error {
+		closeFn: func(_ context.Context, id string) (string, error) {
 			closed = true
-			return nil
+			return "explicit", nil
 		},
 	}
 	sess := newTestClient(t, mgr, nil)
@@ -194,8 +202,8 @@ func TestTool_SessionClose(t *testing.T) {
 
 func TestTool_SessionSend_Error(t *testing.T) {
 	mgr := &fakeManager{
-		sendFn: func(_ context.Context, _ string, _ []byte, _ time.Duration) ([]byte, bool, bool, error) {
-			return nil, false, false, errors.New("session gone")
+		sendFn: func(_ context.Context, _ string, _ session.SendInput) (session.SendResult, error) {
+			return session.SendResult{}, errors.New("session gone")
 		},
 	}
 	sess := newTestClient(t, mgr, nil)
@@ -214,8 +222,8 @@ func TestTool_SessionSend_Error(t *testing.T) {
 
 func TestTool_SessionClose_Error(t *testing.T) {
 	mgr := &fakeManager{
-		closeFn: func(_ context.Context, _ string) error {
-			return errors.New("session not found")
+		closeFn: func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("session not found")
 		},
 	}
 	sess := newTestClient(t, mgr, nil)

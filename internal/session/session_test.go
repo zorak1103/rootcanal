@@ -105,6 +105,7 @@ func errFactory(err error) newSessionFn {
 }
 
 func minCfg() *config.Config {
+	t := true
 	return &config.Config{
 		Limits: config.Limits{
 			MaxSessionsTotal:     32,
@@ -114,6 +115,11 @@ func minCfg() *config.Config {
 			OutputBufferBytes:    4096,
 			DefaultSendTimeoutMs: 2000,
 			MaxSendTimeoutMs:     30000,
+			DefaultTerm:          "dumb",
+			DefaultCleanOutput:   &t,
+			RunOnceMaxBytes:      1 << 20,
+			RunOnceMaxTimeoutMs:  60000,
+			MaxRunOnceConcurrent: 16,
 		},
 		Hosts: map[string]config.Host{
 			"h": {Address: "h:22", User: "u", KnownHosts: "system", Auth: config.Auth{Type: "agent"}},
@@ -193,7 +199,7 @@ func TestRingBuf_WaitForData_GetsData(t *testing.T) {
 func TestManager_Open_UnknownHost(t *testing.T) {
 	m := newManager(minCfg(), fakeSessions(), nil)
 	defer m.Shutdown(context.Background())
-	_, err := m.Open(context.Background(), "unknown")
+	_, err := m.Open(context.Background(), "unknown", "")
 	if err == nil {
 		t.Fatal("expected error for unknown host")
 	}
@@ -202,7 +208,7 @@ func TestManager_Open_UnknownHost(t *testing.T) {
 func TestManager_Open_DialError(t *testing.T) {
 	m := newManager(minCfg(), errFactory(errors.New("connection refused")), nil)
 	defer m.Shutdown(context.Background())
-	_, err := m.Open(context.Background(), "h")
+	_, err := m.Open(context.Background(), "h", "")
 	if err == nil {
 		t.Fatal("expected dial error")
 	}
@@ -213,7 +219,7 @@ func TestManager_Open_PTYError(t *testing.T) {
 	fs.ptyErr = errors.New("pty not supported")
 	m := newManager(minCfg(), fakeSessions(fs), nil)
 	defer m.Shutdown(context.Background())
-	_, err := m.Open(context.Background(), "h")
+	_, err := m.Open(context.Background(), "h", "")
 	if err == nil {
 		t.Fatal("expected PTY error")
 	}
@@ -226,11 +232,11 @@ func TestManager_Open_MaxTotal(t *testing.T) {
 	m := newManager(cfg, fakeSessions(f1, f2), nil)
 	defer m.Shutdown(context.Background())
 
-	_, err := m.Open(context.Background(), "h")
+	_, err := m.Open(context.Background(), "h", "")
 	if err != nil {
 		t.Fatalf("first Open unexpected error: %v", err)
 	}
-	_, err = m.Open(context.Background(), "h")
+	_, err = m.Open(context.Background(), "h", "")
 	if err == nil {
 		t.Fatal("expected error when global limit exceeded")
 	}
@@ -244,11 +250,11 @@ func TestManager_Open_MaxPerHost(t *testing.T) {
 	m := newManager(cfg, fakeSessions(f1, f2), nil)
 	defer m.Shutdown(context.Background())
 
-	_, err := m.Open(context.Background(), "h")
+	_, err := m.Open(context.Background(), "h", "")
 	if err != nil {
 		t.Fatalf("first Open unexpected error: %v", err)
 	}
-	_, err = m.Open(context.Background(), "h")
+	_, err = m.Open(context.Background(), "h", "")
 	if err == nil {
 		t.Fatal("expected error when per-host limit exceeded")
 	}
@@ -259,20 +265,20 @@ func TestManager_SendClose_RoundTrip(t *testing.T) {
 	m := newManager(minCfg(), fakeSessions(fs), nil)
 	defer m.Shutdown(context.Background())
 
-	id, err := m.Open(context.Background(), "h")
+	id, err := m.Open(context.Background(), "h", "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 
-	output, _, _, err := m.Send(context.Background(), id, []byte("ls\n"), 500*time.Millisecond)
+	res, err := m.Send(context.Background(), id, SendInput{Input: "ls\n", TimeoutMs: 500})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if len(output) == 0 {
+	if len(res.Output) == 0 {
 		t.Error("expected some output, got none")
 	}
 
-	if err := m.Close(context.Background(), id); err != nil {
+	if _, err := m.Close(context.Background(), id); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if len(m.List()) != 0 {
@@ -283,7 +289,7 @@ func TestManager_SendClose_RoundTrip(t *testing.T) {
 func TestManager_Send_UnknownID(t *testing.T) {
 	m := newManager(minCfg(), fakeSessions(), nil)
 	defer m.Shutdown(context.Background())
-	_, _, _, err := m.Send(context.Background(), "s_UNKNOWN", nil, 100*time.Millisecond)
+	_, err := m.Send(context.Background(), "s_UNKNOWN", SendInput{TimeoutMs: 100})
 	if err == nil {
 		t.Fatal("expected error for unknown session ID")
 	}
@@ -292,7 +298,7 @@ func TestManager_Send_UnknownID(t *testing.T) {
 func TestManager_Close_UnknownID(t *testing.T) {
 	m := newManager(minCfg(), fakeSessions(), nil)
 	defer m.Shutdown(context.Background())
-	if err := m.Close(context.Background(), "s_NONE"); err == nil {
+	if _, err := m.Close(context.Background(), "s_NONE"); err == nil {
 		t.Fatal("expected error for unknown session ID")
 	}
 }
@@ -305,7 +311,7 @@ func TestManager_List(t *testing.T) {
 	if len(m.List()) != 0 {
 		t.Fatal("expected 0 sessions before Open")
 	}
-	id, _ := m.Open(context.Background(), "h")
+	id, _ := m.Open(context.Background(), "h", "")
 	list := m.List()
 	if len(list) != 1 {
 		t.Fatalf("expected 1 session, got %d", len(list))
@@ -318,8 +324,8 @@ func TestManager_List(t *testing.T) {
 func TestManager_Shutdown(t *testing.T) {
 	f1, f2 := newFakeSession(), newFakeSession()
 	m := newManager(minCfg(), fakeSessions(f1, f2), nil)
-	m.Open(context.Background(), "h")
-	m.Open(context.Background(), "h")
+	m.Open(context.Background(), "h", "")
+	m.Open(context.Background(), "h", "")
 	m.Shutdown(context.Background())
 	if len(m.List()) != 0 {
 		t.Errorf("expected 0 sessions after Shutdown, got %d", len(m.List()))
@@ -335,7 +341,7 @@ func TestManager_GC_IdleSession(t *testing.T) {
 		fs := newFakeSession()
 		m := newManager(cfg, fakeSessions(fs), nil)
 
-		id, err := m.Open(context.Background(), "h")
+		id, err := m.Open(context.Background(), "h", "")
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -422,7 +428,7 @@ func TestNewManager_Wiring(t *testing.T) {
 	mgr := NewManager(cfg, pool, nil)
 
 	// Open invokes the factory closure; connection to 127.0.0.1:1 fails fast.
-	_, _ = mgr.Open(context.Background(), "h")
+	_, _ = mgr.Open(context.Background(), "h", "")
 
 	mgr.Shutdown(context.Background())
 	pool.Close()
@@ -435,7 +441,7 @@ func TestManager_Send_SessionMarkedClosed(t *testing.T) {
 	m := newManager(minCfg(), fakeSessions(fs), nil)
 	defer m.Shutdown(context.Background())
 
-	id, err := m.Open(context.Background(), "h")
+	id, err := m.Open(context.Background(), "h", "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -446,17 +452,18 @@ func TestManager_Send_SessionMarkedClosed(t *testing.T) {
 	m.mu.RUnlock()
 	s.mu.Lock()
 	s.closed = true
+	s.closedReason = "explicit"
 	s.mu.Unlock()
 
-	output, _, closed, err := m.Send(context.Background(), id, nil, 100*time.Millisecond)
+	res, err := m.Send(context.Background(), id, SendInput{TimeoutMs: 100})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !closed {
-		t.Error("expected closed=true for session with closed flag set")
+	if res.ClosedReason == "" {
+		t.Error("expected non-empty ClosedReason for session with closed flag set")
 	}
-	if output != nil {
-		t.Errorf("expected nil output, got %q", output)
+	if res.Output != "" {
+		t.Errorf("expected empty output, got %q", res.Output)
 	}
 }
 
@@ -518,7 +525,7 @@ func TestManager_Open_TOCTOU_GlobalCap(t *testing.T) {
 	for range concurrent {
 		go func() {
 			defer wg.Done()
-			_, err := m.Open(context.Background(), "h")
+			_, err := m.Open(context.Background(), "h", "")
 			if err == nil {
 				successCount.Add(1)
 			} else {
@@ -559,7 +566,7 @@ func TestManager_Open_TOCTOU_PerHostCap(t *testing.T) {
 	for range concurrent {
 		go func() {
 			defer wg.Done()
-			_, err := m.Open(context.Background(), "h")
+			_, err := m.Open(context.Background(), "h", "")
 			if err == nil {
 				successCount.Add(1)
 			}
@@ -591,12 +598,12 @@ func TestManager_Open_FailureReleasesReservation(t *testing.T) {
 	m := newManager(cfg, factory, nil)
 	defer m.Shutdown(context.Background())
 
-	_, err := m.Open(context.Background(), "h")
+	_, err := m.Open(context.Background(), "h", "")
 	if err == nil {
 		t.Fatal("expected first Open to fail (factory error)")
 	}
 
-	_, err = m.Open(context.Background(), "h")
+	_, err = m.Open(context.Background(), "h", "")
 	if err != nil {
 		t.Fatalf("second Open should succeed after reservation was rolled back: %v", err)
 	}

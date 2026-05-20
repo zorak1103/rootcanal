@@ -19,20 +19,24 @@ const (
 	quiesce   = 50 * time.Millisecond
 )
 
-// SessionInfo is a snapshot of a session's metadata.
+// SessionInfo is a snapshot of a session's metadata returned by List.
 type SessionInfo struct {
-	ID         string
-	Host       string
-	OpenedAt   time.Time
-	LastUsedAt time.Time
+	ID           string
+	Name         string
+	Host         string
+	OpenedAt     time.Time
+	LastUsedAt   time.Time
+	LastExitCode *int
+	StillRunning bool
 }
 
 // Manager manages persistent SSH shell sessions.
 type Manager interface {
-	Open(ctx context.Context, host string) (id string, err error)
-	Send(ctx context.Context, id string, input []byte, timeout time.Duration) (output []byte, truncated, closed bool, err error)
-	Close(ctx context.Context, id string) error
+	Open(ctx context.Context, host, name string) (id string, err error)
+	Send(ctx context.Context, id string, in SendInput) (SendResult, error)
+	Close(ctx context.Context, id string) (closedReason string, err error)
 	List() []SessionInfo
+	RunOnce(ctx context.Context, host string, in RunOnceInput) (RunOnceOutput, error)
 	Shutdown(ctx context.Context) error
 }
 
@@ -88,9 +92,15 @@ type manager struct {
 	gcDone chan struct{}
 }
 
-func (m *manager) Open(ctx context.Context, host string) (string, error) {
+func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	if _, ok := m.cfg.Hosts[host]; !ok {
 		return "", fmt.Errorf("unknown host %q", host)
+	}
+
+	if name != "" {
+		if err := validateName(name); err != nil {
+			return "", err
+		}
 	}
 
 	limits := m.cfg.Limits
@@ -110,6 +120,14 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 	if limits.MaxSessionsPerHost > 0 && m.perHost[host] >= limits.MaxSessionsPerHost {
 		m.mu.Unlock()
 		return "", fmt.Errorf("host %q: per-host session limit of %d reached", host, limits.MaxSessionsPerHost)
+	}
+	if name != "" {
+		for _, s := range m.sessions {
+			if s.name == name {
+				m.mu.Unlock()
+				return "", fmt.Errorf("session name %q already in use", name)
+			}
+		}
 	}
 	m.pending++
 	m.perHost[host]++
@@ -165,6 +183,7 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 	done := make(chan struct{})
 	s := &session{
 		id:          id,
+		name:        name,
 		host:        host,
 		sshSess:     sshSess,
 		stdin:       stdin,
@@ -197,20 +216,23 @@ func (m *manager) Open(ctx context.Context, host string) (string, error) {
 	return id, nil
 }
 
-func (m *manager) Send(ctx context.Context, id string, input []byte, timeout time.Duration) ([]byte, bool, bool, error) {
+func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult, error) {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()
 	if !ok {
-		return nil, false, false, fmt.Errorf("session %q not found", id)
+		return SendResult{}, fmt.Errorf("session %q not found", id)
 	}
 
-	limits := m.cfg.Limits
+	var warnings []string
+	timeout := time.Duration(in.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
-		timeout = time.Duration(limits.DefaultSendTimeoutMs) * time.Millisecond
+		timeout = time.Duration(m.cfg.Limits.DefaultSendTimeoutMs) * time.Millisecond
 	}
-	maxTimeout := time.Duration(limits.MaxSendTimeoutMs) * time.Millisecond
+	maxTimeout := time.Duration(m.cfg.Limits.MaxSendTimeoutMs) * time.Millisecond
 	if maxTimeout > 0 && timeout > maxTimeout {
+		warnings = append(warnings, fmt.Sprintf("timeout_ms clamped from %d to %d",
+			in.TimeoutMs, m.cfg.Limits.MaxSendTimeoutMs))
 		timeout = maxTimeout
 	}
 
@@ -219,43 +241,50 @@ func (m *manager) Send(ctx context.Context, id string, input []byte, timeout tim
 
 	s.mu.Lock()
 	if s.closed {
+		cr := s.closedReason
 		s.mu.Unlock()
-		return nil, false, true, nil
+		return SendResult{ClosedReason: cr, Warnings: warnings}, nil
 	}
 	s.lastUsedAt = time.Now()
 	s.mu.Unlock()
 
-	if len(input) > 0 {
+	if in.Input != "" {
 		ch := make(chan error, 1)
 		go func() {
-			_, err := s.stdin.Write(input)
+			_, err := s.stdin.Write([]byte(in.Input))
 			ch <- err
 		}()
 		select {
 		case err := <-ch:
 			if err != nil {
-				return nil, false, false, fmt.Errorf("writing to session %q stdin: %w", id, err)
+				return SendResult{}, fmt.Errorf("writing to session %q stdin: %w", id, err)
 			}
 		case <-ctx.Done():
-			return nil, false, false, ctx.Err()
+			return SendResult{}, ctx.Err()
 		}
 	}
 
 	s.out.WaitForData(ctx, quiesce, timeout)
-
 	output, truncated := s.out.Drain()
 
-	var closed bool
+	var closedReason string
 	select {
 	case <-s.done:
-		closed = true
+		s.mu.Lock()
+		closedReason = s.closedReason
+		s.mu.Unlock()
 	default:
 	}
 
-	return output, truncated, closed, nil
+	return SendResult{
+		Output:       string(output),
+		Truncated:    truncated,
+		ClosedReason: closedReason,
+		Warnings:     warnings,
+	}, nil
 }
 
-func (m *manager) Close(_ context.Context, id string) error {
+func (m *manager) Close(_ context.Context, id string) (string, error) {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	if ok {
@@ -268,14 +297,14 @@ func (m *manager) Close(_ context.Context, id string) error {
 	m.mu.Unlock()
 
 	if !ok {
-		return fmt.Errorf("session %q not found", id)
+		return "", fmt.Errorf("session %q not found", id)
 	}
 
 	s.mu.Lock()
 	s.closed = true
+	s.closedReason = "explicit"
 	s.mu.Unlock()
 
-	// Wait for any in-flight Send to complete before closing pipes.
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
@@ -284,7 +313,7 @@ func (m *manager) Close(_ context.Context, id string) error {
 	s.releasePool()
 
 	m.log.Info("session closed", "id", id, "host", s.host)
-	return nil
+	return "explicit", nil
 }
 
 func (m *manager) List() []SessionInfo {
@@ -295,15 +324,23 @@ func (m *manager) List() []SessionInfo {
 	for _, s := range m.sessions {
 		s.mu.Lock()
 		info := SessionInfo{
-			ID:         s.id,
-			Host:       s.host,
-			OpenedAt:   s.openedAt,
-			LastUsedAt: s.lastUsedAt,
+			ID:           s.id,
+			Name:         s.name,
+			Host:         s.host,
+			OpenedAt:     s.openedAt,
+			LastUsedAt:   s.lastUsedAt,
+			LastExitCode: s.lastExitCode,
+			StillRunning: s.inflight != nil,
 		}
 		s.mu.Unlock()
 		infos = append(infos, info)
 	}
 	return infos
+}
+
+// RunOnce is fully implemented in runonce.go (Task 6). Stub for now.
+func (m *manager) RunOnce(_ context.Context, _ string, _ RunOnceInput) (RunOnceOutput, error) {
+	return RunOnceOutput{}, fmt.Errorf("RunOnce: not yet implemented")
 }
 
 func (m *manager) Shutdown(ctx context.Context) error {
@@ -325,7 +362,7 @@ func (m *manager) Shutdown(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
-		_ = m.Close(ctx, id)
+		_, _ = m.Close(ctx, id)
 	}
 	return ctx.Err()
 }
@@ -366,6 +403,6 @@ func (m *manager) gcTick(idleTimeout, maxAge time.Duration) {
 
 	for _, id := range snapshot {
 		m.log.Info("GC closing idle session", "id", id)
-		_ = m.Close(context.Background(), id)
+		_, _ = m.Close(context.Background(), id)
 	}
 }
