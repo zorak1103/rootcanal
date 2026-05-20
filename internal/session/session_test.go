@@ -779,8 +779,12 @@ func (g *gatedFakeSession) Shell() error {
 				// Exit marker: wait for gate before responding
 				if _, after, ok := bytes.Cut(input, []byte("RC_EXIT_")); ok {
 					if nonce, _, ok := bytes.Cut(after, []byte("_%d")); ok {
-						<-g.gate // block until test releases
-						_, _ = g.outWriter.Write([]byte("\nRC_EXIT_" + string(nonce) + "_0\n"))
+						select {
+						case <-g.gate: // block until test releases
+							_, _ = g.outWriter.Write([]byte("\nRC_EXIT_" + string(nonce) + "_0\n"))
+						case <-g.closeCh:
+							return
+						}
 					}
 					continue
 				}
@@ -898,6 +902,8 @@ func TestManager_Send_TimeoutWarning(t *testing.T) {
 	}
 	if len(res.Warnings) == 0 {
 		t.Error("expected timeout clamp warning")
+	} else if !strings.Contains(res.Warnings[0], "clamped") {
+		t.Errorf("warning should mention 'clamped', got %q", res.Warnings[0])
 	}
 	mgr.Close(context.Background(), id)
 }
