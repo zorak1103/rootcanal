@@ -9,6 +9,8 @@ type CapabilitiesInfo struct {
 	SFTPAllowedPrefixes []string `json:"sftp_allowed_prefixes"`
 	IdleTimeoutMs       int64    `json:"idle_timeout_ms"`
 	MaxSessionAgeMs     int64    `json:"max_session_age_ms"`
+	Term                string   `json:"term,omitempty"`
+	CleanOutput         *bool    `json:"clean_output,omitempty"`
 }
 
 // Capabilities returns the capability set for a named host.
@@ -23,5 +25,7 @@ func (c *Config) Capabilities(host string) (CapabilitiesInfo, error) {
 		SFTPAllowedPrefixes: h.SFTPAllowedPrefixes,
 		IdleTimeoutMs:       h.IdleTimeout.Milliseconds(),
 		MaxSessionAgeMs:     c.Limits.MaxSessionAge.Milliseconds(),
+		Term:                h.Term,
+		CleanOutput:         h.CleanOutput,
 	}, nil
 }

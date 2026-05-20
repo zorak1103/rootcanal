@@ -633,20 +633,44 @@ func TestApplyDefaults_NewV2Fields(t *testing.T) {
 	cfg := &Config{}
 	applyDefaults(cfg)
 
-	if cfg.Limits.DefaultTerm != "dumb" {
-		t.Errorf("DefaultTerm = %q, want %q", cfg.Limits.DefaultTerm, "dumb")
+	if cfg.Limits.DefaultTerm != defaultDefaultTerm {
+		t.Errorf("DefaultTerm = %q, want %q", cfg.Limits.DefaultTerm, defaultDefaultTerm)
 	}
 	if cfg.Limits.DefaultCleanOutput == nil || !*cfg.Limits.DefaultCleanOutput {
 		t.Error("DefaultCleanOutput should default to true")
 	}
-	if cfg.Limits.RunOnceMaxBytes != 1<<20 {
-		t.Errorf("RunOnceMaxBytes = %d, want %d", cfg.Limits.RunOnceMaxBytes, 1<<20)
+	if cfg.Limits.RunOnceMaxBytes != defaultRunOnceMaxBytes {
+		t.Errorf("RunOnceMaxBytes = %d, want %d", cfg.Limits.RunOnceMaxBytes, defaultRunOnceMaxBytes)
 	}
-	if cfg.Limits.RunOnceMaxTimeoutMs != 60000 {
-		t.Errorf("RunOnceMaxTimeoutMs = %d, want 60000", cfg.Limits.RunOnceMaxTimeoutMs)
+	if cfg.Limits.RunOnceMaxTimeoutMs != defaultRunOnceMaxTimeoutMs {
+		t.Errorf("RunOnceMaxTimeoutMs = %d, want %d", cfg.Limits.RunOnceMaxTimeoutMs, defaultRunOnceMaxTimeoutMs)
 	}
-	if cfg.Limits.MaxRunOnceConcurrent != 16 {
-		t.Errorf("MaxRunOnceConcurrent = %d, want 16", cfg.Limits.MaxRunOnceConcurrent)
+	if cfg.Limits.MaxRunOnceConcurrent != defaultMaxRunOnceConcurrent {
+		t.Errorf("MaxRunOnceConcurrent = %d, want %d", cfg.Limits.MaxRunOnceConcurrent, defaultMaxRunOnceConcurrent)
+	}
+}
+
+func TestCapabilities_TermAndCleanOutput(t *testing.T) {
+	clean := true
+	cfg := &Config{
+		Limits: Limits{MaxSessionAge: time.Hour},
+		Hosts: map[string]Host{
+			"h": {
+				IdleTimeout: time.Minute,
+				Term:        "xterm-256color",
+				CleanOutput: &clean,
+			},
+		},
+	}
+	got, err := cfg.Capabilities("h")
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if got.Term != "xterm-256color" {
+		t.Errorf("Term = %q, want xterm-256color", got.Term)
+	}
+	if got.CleanOutput == nil || !*got.CleanOutput {
+		t.Error("CleanOutput should be &true")
 	}
 }
 

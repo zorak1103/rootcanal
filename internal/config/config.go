@@ -21,6 +21,12 @@ const (
 	defaultMaxSendTimeoutMs   = 30000
 	defaultSFTPMaxReadBytes   = 5 << 20  // 5 MiB
 	defaultSFTPMaxWriteBytes  = 25 << 20 // 25 MiB
+
+	// v2.0 additions
+	defaultDefaultTerm          = "dumb"
+	defaultRunOnceMaxBytes      = int64(1 << 20) // 1 MiB
+	defaultRunOnceMaxTimeoutMs  = 60000          // 60 s
+	defaultMaxRunOnceConcurrent = 16
 )
 
 // Config is the top-level configuration.
@@ -137,20 +143,20 @@ func applyDefaults(cfg *Config) {
 		l.SFTPMaxWriteBytes = defaultSFTPMaxWriteBytes
 	}
 	if l.DefaultTerm == "" {
-		l.DefaultTerm = "dumb"
+		l.DefaultTerm = defaultDefaultTerm
 	}
 	if l.DefaultCleanOutput == nil {
 		t := true
 		l.DefaultCleanOutput = &t
 	}
 	if l.RunOnceMaxBytes == 0 {
-		l.RunOnceMaxBytes = 1 << 20 // 1 MiB
+		l.RunOnceMaxBytes = defaultRunOnceMaxBytes
 	}
 	if l.RunOnceMaxTimeoutMs == 0 {
-		l.RunOnceMaxTimeoutMs = 60000 // 60 s
+		l.RunOnceMaxTimeoutMs = defaultRunOnceMaxTimeoutMs
 	}
 	if l.MaxRunOnceConcurrent == 0 {
-		l.MaxRunOnceConcurrent = 16
+		l.MaxRunOnceConcurrent = defaultMaxRunOnceConcurrent
 	}
 
 	for name, h := range cfg.Hosts {
