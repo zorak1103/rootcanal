@@ -68,12 +68,10 @@ func (f *fakeSession) Shell() error {
 				}
 				// Exit marker: "<user_cmd>; printf '\nRC_EXIT_<nonce>_%d\n' $?\n"
 				// Respond with exit code 0.
-				if idx := bytes.Index(input, []byte("RC_EXIT_")); idx != -1 {
-					rest := input[idx+len("RC_EXIT_"):]
+				if _, after, ok := bytes.Cut(input, []byte("RC_EXIT_")); ok {
 					// nonce ends at "_%d" (the printf format spec in the wire command)
-					if uidx := bytes.Index(rest, []byte("_%d")); uidx > 0 {
-						nonce := string(rest[:uidx])
-						_, _ = f.outWriter.Write([]byte("\nRC_EXIT_" + nonce + "_0\n"))
+					if nonce, _, ok := bytes.Cut(after, []byte("_%d")); ok {
+						_, _ = f.outWriter.Write([]byte("\nRC_EXIT_" + string(nonce) + "_0\n"))
 					}
 					continue
 				}
@@ -779,12 +777,10 @@ func (g *gatedFakeSession) Shell() error {
 					continue
 				}
 				// Exit marker: wait for gate before responding
-				if idx := bytes.Index(input, []byte("RC_EXIT_")); idx != -1 {
-					rest := input[idx+len("RC_EXIT_"):]
-					if uidx := bytes.Index(rest, []byte("_%d")); uidx > 0 {
-						nonce := string(rest[:uidx])
+				if _, after, ok := bytes.Cut(input, []byte("RC_EXIT_")); ok {
+					if nonce, _, ok := bytes.Cut(after, []byte("_%d")); ok {
 						<-g.gate // block until test releases
-						_, _ = g.outWriter.Write([]byte("\nRC_EXIT_" + nonce + "_0\n"))
+						_, _ = g.outWriter.Write([]byte("\nRC_EXIT_" + string(nonce) + "_0\n"))
 					}
 					continue
 				}

@@ -283,8 +283,6 @@ func (m *manager) bootSession(ctx context.Context, s *session, maxWait time.Dura
 	}
 }
 
-const markerExitPrefix = "RC_EXIT_"
-
 func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult, error) {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
@@ -431,19 +429,15 @@ func (m *manager) waitForMarker(
 			trunc = true
 		}
 
-		if idx := bytes.Index(accumulated, markerPrefix); idx != -1 {
+		if before, rest, found := bytes.Cut(accumulated, markerPrefix); found {
 			// Extract exit code from: \nRC_EXIT_<nonce>_<code>\n
-			rest := accumulated[idx+len(markerPrefix):]
 			end := bytes.IndexByte(rest, '\n')
 			if end < 0 {
 				end = len(rest)
 			}
-			code, err := strconv.Atoi(strings.TrimSpace(string(rest[:end])))
-			if err != nil {
-				code = 0
-			}
+			code, _ := strconv.Atoi(strings.TrimSpace(string(rest[:end])))
 
-			output := accumulated[:idx]
+			output := before
 			if !raw {
 				output = cleanOutput(output)
 			}
