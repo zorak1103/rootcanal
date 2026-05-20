@@ -959,3 +959,166 @@ func TestManager_Open_FailureReleasesReservation(t *testing.T) {
 		t.Fatalf("second Open should succeed after reservation was rolled back: %v", err)
 	}
 }
+
+// ---- Send WaitIdleMs (peek mode) ----
+
+func TestManager_Send_WaitIdleMs_Peek(t *testing.T) {
+	// Peek mode returns whatever is buffered after idle_ms of silence.
+	fs := newFakeSession()
+	mgr := newManager(minCfg(), fakeSessions(fs), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, _ := mgr.Open(context.Background(), "h", "")
+
+	// Peek with no activity → empty output.
+	res, err := mgr.Send(context.Background(), id, SendInput{WaitIdleMs: 50})
+	if err != nil {
+		t.Fatalf("Send peek: %v", err)
+	}
+	if res.Output != "" {
+		t.Errorf("peek output = %q, want empty", res.Output)
+	}
+
+	_, _ = mgr.Close(context.Background(), id)
+}
+
+func TestManager_Send_WaitIdleMs_MutuallyExclusive(t *testing.T) {
+	fs := newFakeSession()
+	mgr := newManager(minCfg(), fakeSessions(fs), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, _ := mgr.Open(context.Background(), "h", "")
+	defer mgr.Close(context.Background(), id)
+
+	_, err := mgr.Send(context.Background(), id, SendInput{Input: "ls\n", WaitIdleMs: 100})
+	if err == nil {
+		t.Error("expected error when both Input and WaitIdleMs are set")
+	}
+}
+
+// ---- Send Raw mode ----
+
+func TestManager_Send_Raw(t *testing.T) {
+	fs := newFakeSession()
+	mgr := newManager(minCfg(), fakeSessions(fs), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, _ := mgr.Open(context.Background(), "h", "")
+	defer mgr.Close(context.Background(), id)
+
+	// Raw mode: no marker injected, output returned as-is.
+	res, err := mgr.Send(context.Background(), id, SendInput{Input: "ls\n", TimeoutMs: 500, Raw: true})
+	if err != nil {
+		t.Fatalf("Send raw: %v", err)
+	}
+	// ExitCode should be nil in raw mode.
+	if res.ExitCode != nil {
+		t.Errorf("ExitCode should be nil in raw mode, got %d", *res.ExitCode)
+	}
+	// Output should contain the echo (not cleaned).
+	if !strings.Contains(res.Output, "ls\n") {
+		t.Errorf("raw output should contain echoed input, got %q", res.Output)
+	}
+}
+
+// ---- Send session closed during waitForMarker ----
+
+func TestManager_Send_SessionClosedDuringWait(t *testing.T) {
+	// Use a gated fake that blocks exit markers so Send stays inside waitForMarker.
+	// We close the underlying SSH session directly (not via mgr.Close, which would
+	// deadlock on sendMu) so that s.done fires and waitForMarker detects closure.
+	gate := make(chan struct{})
+	gated := &gatedFakeSession{fakeSession: newFakeSession(), gate: gate}
+	mgr := newManager(minCfg(), fakeSessionsIface(gated), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, err := mgr.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	sendDone := make(chan SendResult, 1)
+	go func() {
+		res, _ := mgr.Send(context.Background(), id, SendInput{Input: "cmd\n", TimeoutMs: 5000})
+		sendDone <- res
+	}()
+
+	// Give Send time to enter waitForMarker before we simulate SSH disconnect.
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark session closed and close the underlying SSH session directly so s.done fires.
+	mgr.mu.RLock()
+	s := mgr.sessions[id]
+	mgr.mu.RUnlock()
+	s.mu.Lock()
+	s.closed = true
+	s.closedReason = "lost"
+	s.mu.Unlock()
+	// Closing the fake SSH session makes its Wait() return, closing s.done.
+	gated.fakeSession.Close()
+	close(gate)
+
+	res := <-sendDone
+	if res.ClosedReason == "" {
+		t.Error("expected non-empty ClosedReason when session closed during Send")
+	}
+}
+
+// ---- Send context cancellation ----
+
+func TestManager_Send_ContextCancelled(t *testing.T) {
+	gate := make(chan struct{})
+	gated := &gatedFakeSession{fakeSession: newFakeSession(), gate: gate}
+	cfg := minCfg()
+	cfg.Limits.MaxSendTimeoutMs = 10000
+	mgr := newManager(cfg, fakeSessionsIface(gated), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, _ := mgr.Open(context.Background(), "h", "")
+	defer func() { close(gate); mgr.Close(context.Background(), id) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := mgr.Send(ctx, id, SendInput{Input: "cmd\n", TimeoutMs: 5000})
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	err := <-errCh
+	if err == nil {
+		t.Error("expected error from cancelled context")
+	}
+}
+
+// ---- Open name validation via Open ----
+
+func TestManager_Open_NameValidation(t *testing.T) {
+	// validateName rejects the s_ prefix; Open should propagate that error.
+	m := newManager(minCfg(), fakeSessions(newFakeSession()), nil)
+	defer m.Shutdown(context.Background())
+
+	_, err := m.Open(context.Background(), "h", "s_reserved")
+	if err == nil {
+		t.Fatal("expected error for name with s_ prefix")
+	}
+}
+
+func TestManager_Open_NameCollision(t *testing.T) {
+	f1 := newFakeSession()
+	f2 := newFakeSession()
+	m := newManager(minCfg(), fakeSessions(f1, f2), nil)
+	defer m.Shutdown(context.Background())
+
+	_, err := m.Open(context.Background(), "h", "myservice")
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+
+	_, err = m.Open(context.Background(), "h", "myservice")
+	if err == nil {
+		t.Fatal("expected error for duplicate session name")
+	}
+}
