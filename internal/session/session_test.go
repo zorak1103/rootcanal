@@ -66,6 +66,17 @@ func (f *fakeSession) Shell() error {
 					}
 					continue
 				}
+				// Exit marker: "<user_cmd>; printf '\nRC_EXIT_<nonce>_%d\n' $?\n"
+				// Respond with exit code 0.
+				if idx := bytes.Index(input, []byte("RC_EXIT_")); idx != -1 {
+					rest := input[idx+len("RC_EXIT_"):]
+					// nonce ends at "_%d" (the printf format spec in the wire command)
+					if uidx := bytes.Index(rest, []byte("_%d")); uidx > 0 {
+						nonce := string(rest[:uidx])
+						_, _ = f.outWriter.Write([]byte("\nRC_EXIT_" + nonce + "_0\n"))
+					}
+					continue
+				}
 				// Default: echo input (used by raw-mode tests and Task 5).
 				_, _ = f.outWriter.Write(append([]byte("$ "), input...))
 			case <-f.closeCh:
@@ -295,8 +306,8 @@ func TestManager_SendClose_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if len(res.Output) == 0 {
-		t.Error("expected some output, got none")
+	if res.ExitCode == nil {
+		t.Error("expected ExitCode to be set after successful Send")
 	}
 
 	if _, err := m.Close(context.Background(), id); err != nil {
@@ -739,6 +750,160 @@ func (m *motdFakeSession) Shell() error {
 		}
 	}()
 	return nil
+}
+
+// gatedFakeSession holds exit marker responses until gate is closed.
+type gatedFakeSession struct {
+	*fakeSession
+	gate <-chan struct{}
+}
+
+func (g *gatedFakeSession) Shell() error {
+	if g.shellErr != nil {
+		return g.shellErr
+	}
+	go func() {
+		for {
+			select {
+			case input := <-g.stdinCh:
+				if g.outWriter == nil {
+					continue
+				}
+				// Boot marker
+				if idx := bytes.Index(input, []byte("RC_READY_")); idx != -1 {
+					rest := input[idx:]
+					if end := bytes.IndexByte(rest, '\n'); end > 0 {
+						marker := rest[:end]
+						_, _ = g.outWriter.Write(append(append([]byte("\n"), marker...), '\n'))
+					}
+					continue
+				}
+				// Exit marker: wait for gate before responding
+				if idx := bytes.Index(input, []byte("RC_EXIT_")); idx != -1 {
+					rest := input[idx+len("RC_EXIT_"):]
+					if uidx := bytes.Index(rest, []byte("_%d")); uidx > 0 {
+						nonce := string(rest[:uidx])
+						<-g.gate // block until test releases
+						_, _ = g.outWriter.Write([]byte("\nRC_EXIT_" + nonce + "_0\n"))
+					}
+					continue
+				}
+				_, _ = g.outWriter.Write(append([]byte("$ "), input...))
+			case <-g.closeCh:
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+func TestManager_Send_ExitCode(t *testing.T) {
+	fs := newFakeSession()
+	mgr := newManager(minCfg(), fakeSessions(fs), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, err := mgr.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	res, err := mgr.Send(context.Background(), id, SendInput{Input: "ls\n", TimeoutMs: 2000})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if res.ExitCode == nil {
+		t.Fatal("ExitCode should not be nil")
+	}
+	if *res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", *res.ExitCode)
+	}
+	if res.StillRunning {
+		t.Error("StillRunning should be false")
+	}
+	mgr.Close(context.Background(), id)
+}
+
+func TestManager_Send_StillRunning_Continuation(t *testing.T) {
+	gate := make(chan struct{})
+	gated := &gatedFakeSession{fakeSession: newFakeSession(), gate: gate}
+	mgr := newManager(minCfg(), fakeSessionsIface(gated), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, _ := mgr.Open(context.Background(), "h", "")
+
+	// First send: short timeout, marker blocked.
+	res1, err := mgr.Send(context.Background(), id, SendInput{Input: "sleep 5\n", TimeoutMs: 100})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !res1.StillRunning {
+		t.Fatal("expected StillRunning=true on first send")
+	}
+	if res1.ExitCode != nil {
+		t.Errorf("ExitCode should be nil when still running, got %d", *res1.ExitCode)
+	}
+
+	// Release gate so fake emits exit marker.
+	close(gate)
+
+	// Continuation: empty input waits for the same marker.
+	res2, err := mgr.Send(context.Background(), id, SendInput{Input: "", TimeoutMs: 2000})
+	if err != nil {
+		t.Fatalf("continuation Send: %v", err)
+	}
+	if res2.StillRunning {
+		t.Error("continuation: StillRunning should be false")
+	}
+	if res2.ExitCode == nil || *res2.ExitCode != 0 {
+		t.Errorf("continuation ExitCode = %v, want &0", res2.ExitCode)
+	}
+
+	mgr.Close(context.Background(), id)
+}
+
+func TestManager_Send_InFlightRejection(t *testing.T) {
+	fs := newFakeSession()
+	mgr := newManager(minCfg(), fakeSessions(fs), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, _ := mgr.Open(context.Background(), "h", "")
+
+	// Manually set inflight to simulate a stuck command.
+	mgr.mu.RLock()
+	s := mgr.sessions[id]
+	mgr.mu.RUnlock()
+	s.mu.Lock()
+	s.inflight = &inflight{nonce: "FAKEFAKE"}
+	s.mu.Unlock()
+
+	_, err := mgr.Send(context.Background(), id, SendInput{Input: "cmd2\n", TimeoutMs: 100})
+	if err == nil {
+		t.Error("expected error when inflight is set")
+	}
+
+	// Clean up inflight for Close to work.
+	s.mu.Lock()
+	s.inflight = nil
+	s.mu.Unlock()
+	mgr.Close(context.Background(), id)
+}
+
+func TestManager_Send_TimeoutWarning(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.MaxSendTimeoutMs = 500
+	fs := newFakeSession()
+	mgr := newManager(cfg, fakeSessions(fs), nil)
+	defer mgr.Shutdown(context.Background())
+
+	id, _ := mgr.Open(context.Background(), "h", "")
+	res, err := mgr.Send(context.Background(), id, SendInput{Input: "x\n", TimeoutMs: 5000})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("expected timeout clamp warning")
+	}
+	mgr.Close(context.Background(), id)
 }
 
 func TestManager_Open_FailureReleasesReservation(t *testing.T) {

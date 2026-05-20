@@ -3,8 +3,11 @@ package session
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -217,7 +220,24 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 
 	// Launch Wait goroutine after registration so Shutdown cannot miss this session.
 	go func() {
-		_ = sshSess.Wait()
+		err := sshSess.Wait()
+		s.mu.Lock()
+		if !s.closed { // explicit Close() already set this
+			s.closed = true
+			var exitErr *ssh.ExitError
+			var missingErr *ssh.ExitMissingError
+			switch {
+			case err == nil:
+				s.closedReason = "exit"
+			case errors.As(err, &exitErr):
+				s.closedReason = "exit"
+			case errors.As(err, &missingErr):
+				s.closedReason = "lost"
+			default:
+				s.closedReason = "lost"
+			}
+		}
+		s.mu.Unlock()
 		close(s.done)
 	}()
 
@@ -263,14 +283,18 @@ func (m *manager) bootSession(ctx context.Context, s *session, maxWait time.Dura
 	}
 }
 
+const markerExitPrefix = "RC_EXIT_"
+
 func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult, error) {
-	// NOTE: WaitIdleMs peek mode and marker-based completion are implemented in Task 5.
-	// This stub uses the v1 quiesce-based approach regardless of WaitIdleMs.
 	m.mu.RLock()
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()
 	if !ok {
 		return SendResult{}, fmt.Errorf("session %q not found", id)
+	}
+
+	if in.Input != "" && in.WaitIdleMs > 0 {
+		return SendResult{}, fmt.Errorf("input and wait_idle_ms are mutually exclusive")
 	}
 
 	var warnings []string
@@ -294,15 +318,48 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		s.mu.Unlock()
 		return SendResult{ClosedReason: cr, Warnings: warnings}, nil
 	}
-	s.lastUsedAt = time.Now()
-	s.mu.Unlock()
 
-	if in.Input != "" {
+	// Peek mode: wait for idle, no marker injection.
+	if in.WaitIdleMs > 0 {
+		s.lastUsedAt = time.Now()
+		s.mu.Unlock()
+		idleDur := time.Duration(in.WaitIdleMs) * time.Millisecond
+		s.out.WaitForData(ctx, idleDur, idleDur)
+		out, trunc := s.out.Drain()
+		s.mu.Lock()
+		cr := s.closedReason
+		s.mu.Unlock()
+		return SendResult{
+			Output:       string(cleanOutput(out)),
+			Truncated:    trunc,
+			ClosedReason: cr,
+			Warnings:     warnings,
+		}, nil
+	}
+
+	// Continuation mode: empty input waits for in-flight marker.
+	if in.Input == "" {
+		if s.inflight == nil {
+			s.mu.Unlock()
+			return SendResult{Warnings: warnings}, nil
+		}
+		nonce := s.inflight.nonce
+		s.mu.Unlock()
+		return m.waitForMarker(ctx, s, nonce, timeout, in.Raw, warnings)
+	}
+
+	// New command: reject if another is in flight.
+	if s.inflight != nil {
+		s.mu.Unlock()
+		return SendResult{}, fmt.Errorf("command still in flight; send empty input to continue waiting")
+	}
+
+	// Raw mode: write as-is, no marker.
+	if in.Raw {
+		s.lastUsedAt = time.Now()
+		s.mu.Unlock()
 		ch := make(chan error, 1)
-		go func() {
-			_, err := s.stdin.Write([]byte(in.Input))
-			ch <- err
-		}()
+		go func() { _, err := s.stdin.Write([]byte(in.Input)); ch <- err }()
 		select {
 		case err := <-ch:
 			if err != nil {
@@ -311,24 +368,146 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		case <-ctx.Done():
 			return SendResult{}, ctx.Err()
 		}
-	}
-
-	s.out.WaitForData(ctx, quiesce, timeout)
-	output, truncated := s.out.Drain()
-
-	var closedReason string
-	select {
-	case <-s.done:
+		s.out.WaitForData(ctx, quiesce, timeout)
+		out, trunc := s.out.Drain()
 		s.mu.Lock()
-		closedReason = s.closedReason
+		cr := s.closedReason
 		s.mu.Unlock()
-	default:
+		return SendResult{Output: string(out), Truncated: trunc, ClosedReason: cr, Warnings: warnings}, nil
 	}
+
+	// Normal mode: inject exit marker.
+	nonce := newMarkerNonce()
+	s.inflight = &inflight{nonce: nonce, input: in.Input}
+	s.lastUsedAt = time.Now()
+	s.mu.Unlock()
+
+	cmd := fmt.Sprintf("%s; printf '\\nRC_EXIT_%s_%%d\\n' $?\n", in.Input, nonce)
+	ch := make(chan error, 1)
+	go func() { _, err := s.stdin.Write([]byte(cmd)); ch <- err }()
+	select {
+	case err := <-ch:
+		if err != nil {
+			s.mu.Lock()
+			s.inflight = nil
+			s.mu.Unlock()
+			return SendResult{}, fmt.Errorf("writing to session %q stdin: %w", id, err)
+		}
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.inflight = nil
+		s.mu.Unlock()
+		return SendResult{}, ctx.Err()
+	}
+
+	return m.waitForMarker(ctx, s, nonce, timeout, false, warnings)
+}
+
+func (m *manager) waitForMarker(
+	ctx context.Context,
+	s *session,
+	nonce string,
+	timeout time.Duration,
+	raw bool,
+	warnings []string,
+) (SendResult, error) {
+	markerPrefix := []byte("\nRC_EXIT_" + nonce + "_")
+	var accumulated []byte
+	var trunc bool
+	deadline := time.Now().Add(timeout)
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		bCtx, cancel := context.WithDeadline(ctx, deadline)
+		s.out.WaitForData(bCtx, quiesce, remaining)
+		cancel()
+
+		chunk, t := s.out.Drain()
+		accumulated = append(accumulated, chunk...)
+		if t {
+			trunc = true
+		}
+
+		if idx := bytes.Index(accumulated, markerPrefix); idx != -1 {
+			// Extract exit code from: \nRC_EXIT_<nonce>_<code>\n
+			rest := accumulated[idx+len(markerPrefix):]
+			end := bytes.IndexByte(rest, '\n')
+			if end < 0 {
+				end = len(rest)
+			}
+			code, err := strconv.Atoi(strings.TrimSpace(string(rest[:end])))
+			if err != nil {
+				code = 0
+			}
+
+			output := accumulated[:idx]
+			if !raw {
+				output = cleanOutput(output)
+			}
+
+			s.mu.Lock()
+			s.inflight = nil
+			ec := code
+			s.lastExitCode = &ec
+			s.lastUsedAt = time.Now()
+			cr := s.closedReason
+			s.mu.Unlock()
+
+			return SendResult{
+				Output:       string(output),
+				ExitCode:     &code,
+				Truncated:    trunc,
+				ClosedReason: cr,
+				Warnings:     warnings,
+			}, nil
+		}
+
+		// Check if session closed while waiting.
+		select {
+		case <-s.done:
+			output := accumulated
+			if !raw {
+				output = cleanOutput(output)
+			}
+			s.mu.Lock()
+			s.inflight = nil
+			cr := s.closedReason
+			s.lastUsedAt = time.Now()
+			s.mu.Unlock()
+			return SendResult{
+				Output:       string(output),
+				Truncated:    trunc,
+				ClosedReason: cr,
+				Warnings:     warnings,
+			}, nil
+		default:
+		}
+
+		if ctx.Err() != nil {
+			s.mu.Lock()
+			s.inflight = nil
+			s.mu.Unlock()
+			return SendResult{}, ctx.Err()
+		}
+	}
+
+	// Timeout without marker: keep inflight so continuation works.
+	// DO NOT clear s.inflight here — the caller uses empty-input Send to continue.
+	output := accumulated
+	if !raw {
+		output = cleanOutput(output)
+	}
+	s.mu.Lock()
+	s.lastUsedAt = time.Now()
+	s.mu.Unlock()
 
 	return SendResult{
 		Output:       string(output),
-		Truncated:    truncated,
-		ClosedReason: closedReason,
+		StillRunning: true,
+		Truncated:    trunc,
 		Warnings:     warnings,
 	}, nil
 }
@@ -411,6 +590,16 @@ func (m *manager) Shutdown(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
+		m.mu.RLock()
+		s, ok := m.sessions[id]
+		m.mu.RUnlock()
+		if ok {
+			s.mu.Lock()
+			if s.closedReason == "" {
+				s.closedReason = "shutdown"
+			}
+			s.mu.Unlock()
+		}
 		_, _ = m.Close(ctx, id)
 	}
 	return ctx.Err()
@@ -451,6 +640,21 @@ func (m *manager) gcTick(idleTimeout, maxAge time.Duration) {
 	m.mu.RUnlock()
 
 	for _, id := range snapshot {
+		// Set GC reason before Close so it's visible in SendResult.ClosedReason.
+		m.mu.RLock()
+		s, ok := m.sessions[id]
+		m.mu.RUnlock()
+		if ok {
+			s.mu.Lock()
+			if s.closedReason == "" {
+				if time.Since(s.lastUsedAt) >= idleTimeout {
+					s.closedReason = "idle"
+				} else {
+					s.closedReason = "max_age"
+				}
+			}
+			s.mu.Unlock()
+		}
 		m.log.Info("GC closing idle session", "id", id)
 		_, _ = m.Close(context.Background(), id)
 	}
