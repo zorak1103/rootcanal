@@ -50,7 +50,7 @@ type newSessionFn func(ctx context.Context, host string) (sshSession, func(), er
 
 // NewManager creates a Manager backed by pool.
 func NewManager(cfg *config.Config, pool *hostpool.Pool, log *slog.Logger) Manager {
-	return newManager(cfg, func(ctx context.Context, host string) (sshSession, func(), error) {
+	m := newManager(cfg, func(ctx context.Context, host string) (sshSession, func(), error) {
 		client, release, err := pool.Get(ctx, host)
 		if err != nil {
 			return nil, nil, err
@@ -62,6 +62,8 @@ func NewManager(cfg *config.Config, pool *hostpool.Pool, log *slog.Logger) Manag
 		}
 		return &realSSHSession{raw}, release, nil
 	}, log)
+	m.pool = pool
+	return m
 }
 
 func newManager(cfg *config.Config, factory newSessionFn, log *slog.Logger) *manager {
@@ -85,6 +87,7 @@ type manager struct {
 	cfg     *config.Config
 	factory newSessionFn
 	log     *slog.Logger
+	pool    *hostpool.Pool // nil in tests that don't exercise RunOnce
 
 	mu       sync.RWMutex
 	sessions map[string]*session
@@ -558,11 +561,6 @@ func (m *manager) List() []SessionInfo {
 		infos = append(infos, info)
 	}
 	return infos
-}
-
-// RunOnce is fully implemented in runonce.go (Task 6). Stub for now.
-func (m *manager) RunOnce(_ context.Context, _ string, _ RunOnceInput) (RunOnceOutput, error) {
-	return RunOnceOutput{}, fmt.Errorf("RunOnce: not yet implemented")
 }
 
 func (m *manager) Shutdown(ctx context.Context) error {

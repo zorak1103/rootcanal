@@ -908,6 +908,31 @@ func TestManager_Send_TimeoutWarning(t *testing.T) {
 	mgr.Close(context.Background(), id)
 }
 
+// ---- RunOnce unit tests (no real pool) ----
+
+func TestManager_RunOnce_NilPool(t *testing.T) {
+	mgr := newManager(minCfg(), fakeSessions(), nil)
+	defer mgr.Shutdown(context.Background())
+
+	_, err := mgr.RunOnce(context.Background(), "h", RunOnceInput{Command: "ls"})
+	if err == nil {
+		t.Fatal("expected error when pool is nil")
+	}
+	if !strings.Contains(err.Error(), "no pool configured") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestManager_RunOnce_UnknownHost(t *testing.T) {
+	mgr := newManager(minCfg(), fakeSessions(), nil)
+	defer mgr.Shutdown(context.Background())
+
+	_, err := mgr.RunOnce(context.Background(), "nope", RunOnceInput{Command: "ls"})
+	if err == nil {
+		t.Fatal("expected error for unknown host")
+	}
+}
+
 func TestManager_Open_FailureReleasesReservation(t *testing.T) {
 	cfg := minCfg()
 	cfg.Limits.MaxSessionsTotal = 1
