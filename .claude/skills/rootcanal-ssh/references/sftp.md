@@ -86,7 +86,7 @@ The `mode` parameter on `sftp_write` is an **octal string**:
 Leading `0` is stripped internally before parsing. `mode` is applied via `Chmod` **after** the
 write succeeds. If `mode` is omitted, the file gets the remote SFTP server's default umask (usually `0644`).
 
-Setuid/setgid bits are accepted. Confirm with the user before setting them.
+Setuid/setgid and sticky bits (`04000`, `02000`, `01000`) are **rejected** with `"setuid/setgid/sticky bits not permitted"`. Use only standard permission bits (`0777` and below).
 
 ---
 

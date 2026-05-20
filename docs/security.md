@@ -29,7 +29,7 @@ Every host must have a `known_hosts` entry. rootcanal uses `golang.org/x/crypto/
 
 The config schema has `password_env` and `passphrase_env` fields (environment variable *names*), not `password` or `passphrase` fields (values). The YAML decoder is configured with `KnownFields(true)` so any attempt to add a `password: secret` key is rejected at parse time with an explicit error.
 
-OS keyring (`go-keyring`) support is planned for v1.1, with backends for Windows Credential Manager, macOS Keychain and Linux Secret Service. The config shape is already reserved as `password_keyring: rootcanal/<host>` to avoid breaking changes.
+OS keyring (`go-keyring`) support is planned for a post-2.0 release, with backends for Windows Credential Manager, macOS Keychain and Linux Secret Service. The config shape is already reserved as `password_keyring: rootcanal/<host>` to avoid breaking changes.
 
 ### 4. Resource caps
 
@@ -41,6 +41,9 @@ The config `limits` section enforces:
 | `max_sessions_per_host` | Prevents one host monopolising the connection pool |
 | `sftp_max_read_bytes` | Caps memory allocated per `sftp_read` call |
 | `sftp_max_write_bytes` | Prevents the LLM writing arbitrarily large files |
+| `run_once_max_bytes` | Per-stream output cap for `ssh_run_once` (default 1 MiB each for stdout/stderr) |
+| `run_once_max_timeout_ms` | Hard timeout cap for `ssh_run_once` calls (default 60 s) |
+| `max_run_once_concurrent` | Bounds concurrent `ssh_run_once` exec channels (default 16) |
 
 Both `max_sessions_total` and `max_sessions_per_host` are enforced atomically: the limit check and the slot reservation happen under the same mutex, before the SSH dial begins. Concurrent `ssh_session_open` calls cannot collectively bypass the cap even when the dial takes hundreds of milliseconds.
 
@@ -52,7 +55,7 @@ Each session has a ring buffer (`output_buffer_bytes`, default 1 MiB). If the re
 
 ### 6. UTF-8 enforcement
 
-MCP uses JSON, which requires valid UTF-8. All session output is passed through `strings.ToValidUTF8` before being returned; invalid byte sequences are replaced with U+FFFD. ANSI escape codes and other control characters are **preserved** because stripping them would misrepresent what the remote shell actually sent.
+MCP uses JSON, which requires valid UTF-8. All session output is passed through `strings.ToValidUTF8` before being returned; invalid byte sequences are replaced with U+FFFD. By default, ANSI escape codes and control characters are **stripped** by `cleanOutput` (backed by `jimschubert/stripansi`) before the output is returned, so the LLM receives plain text. Pass `raw: true` to `ssh_session_send` to disable stripping and receive the raw byte stream instead.
 
 SFTP binary files are base64-encoded and returned with `binary: true` so they can be transferred through the JSON transport without modification.
 
@@ -102,7 +105,13 @@ Server-side controls (e.g. `ChrootDirectory` in `sshd_config`) remain valid defe
 
 On Linux/macOS, rootcanal dials `$SSH_AUTH_SOCK`. On Windows, it dials the OpenSSH named pipe `\\.\pipe\openssh-ssh-agent`. The agent performs all cryptographic operations; rootcanal never has access to private key material.
 
-PuTTY/Pageant use a different protocol and are not supported in v1.0.0. Support would require a separate implementation of the Pageant protocol.
+PuTTY/Pageant use a different protocol and are not supported. Support would require a separate implementation of the Pageant protocol.
+
+### 10. New v2.0 tools — threat posture
+
+**`ssh_run_once`** executes a command via an SSH exec channel with no PTY. It is subject to the same host-allowlist enforcement as session tools. Output is bounded by `run_once_max_bytes` (default 1 MiB per stream) and `run_once_max_timeout_ms` (default 60 s). No per-host opt-in is required — all hosts that can be reached via SSH also accept `ssh_run_once` calls.
+
+**`ssh_list_hosts`** and **`ssh_host_capabilities`** return only non-sensitive metadata. Credentials, key paths, and `password_env`/`passphrase_env` values are never included in the response (enforced in `tools_discovery.go`). These tools are read-only and make no network connections.
 
 ## What rootcanal does not protect against
 

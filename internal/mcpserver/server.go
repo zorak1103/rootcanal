@@ -37,7 +37,7 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, onInitialized
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ssh_session_send",
-		Description: "Write input to an open shell session's stdin and return any output received within the timeout. Send an empty input string to just poll for output.",
+		Description: "Write input to an open shell session's stdin and wait for the command to complete (marker-based). Send empty input to continue waiting for an in-flight command. Use wait_idle_ms for raw/REPL mode.",
 	}, handleSessionSend(mgr))
 
 	mcp.AddTool(srv, &mcp.Tool{

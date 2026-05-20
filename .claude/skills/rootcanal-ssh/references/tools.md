@@ -22,11 +22,12 @@ No parameters.
       "address": "prod-web.example.com:22",
       "user": "deploy",
       "auth_type": "key",
-      "sftp_enabled": false
+      "sftp_enabled": true
     }
   ]
 }
 ```
+`description` is omitted when the host config has no `description` field.
 
 Hosts are sorted alphabetically by name. Credentials never appear.
 
@@ -47,9 +48,12 @@ Returns SSH/SFTP capabilities and session limits for a specific host.
   "sftp": false,
   "sftp_allowed_prefixes": [],
   "idle_timeout_ms": 900000,
-  "max_session_age_ms": 14400000
+  "max_session_age_ms": 14400000,
+  "term": "dumb",
+  "clean_output": true
 }
 ```
+`term` and `clean_output` are omitted only when both match the global defaults (unusual).
 
 **Errors:** `"unknown host \"<name>\""` if not in config.
 
@@ -65,7 +69,7 @@ Executes a command on the remote host via a non-PTY exec channel. No session ope
 | `command` | string | yes | Shell command string passed to the remote shell. Requires POSIX-compatible shell (`sh`, `bash`, `zsh`, `dash`, `busybox`). |
 | `stdin` | string | no | Data to pipe to the command's stdin. |
 | `env` | object | no | Key/value environment variables. May be silently rejected by remote `AcceptEnv` policy. |
-| `timeout_ms` | int | no | 0 → server default. Hard cap: 60 000 ms. Higher values clamped and reported via `warnings`. |
+| `timeout_ms` | int | no | 0 → server default (config `run_once_max_timeout_ms`, default 60 000 ms). Values above the server cap are clamped and reported via `warnings`. |
 
 **Success:**
 ```json
@@ -114,9 +118,7 @@ If `name` was supplied, `session_id` contains the client-supplied name instead o
 - `"host \"<name>\": per-host session limit of N reached"` — max_sessions_per_host hit
 - `"manager is shutting down"`
 
-**Internals:** Allocates a PTY (`dumb`, 40×120), requests a shell. Auth and known_hosts
-verification happen here — not on send. Connection is pooled per host (30 s idle timer after
-all sessions for that host are closed). MOTD is suppressed automatically on open.
+**Internals:** Allocates a PTY (`xterm-256color`, 40×120), requests a shell. The `$TERM` environment variable advertised to the remote shell is set from the host's `term` config field (default `"dumb"` — not to be confused with the PTY type). Auth and known_hosts verification happen here — not on send. Connection is pooled per host (30 s idle timer after all sessions for that host are closed). MOTD is suppressed automatically on open.
 
 ---
 
@@ -155,7 +157,7 @@ Writes input to the shell's stdin and waits for output.
 
 **Errors:**
 - `"session \"<id>\" not found"` — expired or already closed
-- `"send in progress"` — attempted to send a new command while `still_running: true`
+- `"command still in flight; send empty input to continue waiting"` — attempted to send a new command while `still_running: true`
 
 **Note:** Send is serialised per session — concurrent sends to the same `session_id` are queued.
 
@@ -259,6 +261,7 @@ Creates or overwrites a file on the remote host via SFTP.
 **Errors:**
 - Content > `sftp_max_write_bytes` (25 MiB) → rejected before any I/O
 - `"invalid mode \"...\": ..."` — bad octal format
+- `"setuid/setgid/sticky bits not permitted"` — mode has setuid (04000), setgid (02000), or sticky (01000) bit set
 - Access control violations (see error-handling.md)
 
 ⚠️ Write uses `O_WRONLY|O_CREATE|O_TRUNC` — existing files are **overwritten immediately with
