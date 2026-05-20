@@ -691,8 +691,8 @@ func TestManager_Open_BootMarkerDrainsOutput(t *testing.T) {
 	}
 
 	// The ring buffer should be empty after bootSession drained MOTD.
-	// A Send that writes nothing and uses peek mode should see no output.
-	res, err := mgr.Send(context.Background(), id, SendInput{WaitIdleMs: 100})
+	// A short-timeout Send with no input should see no buffered output.
+	res, err := mgr.Send(context.Background(), id, SendInput{TimeoutMs: 200})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}

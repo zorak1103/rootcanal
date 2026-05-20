@@ -258,7 +258,7 @@ func (m *manager) bootSession(ctx context.Context, s *session, maxWait time.Dura
 			return nil
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return fmt.Errorf("boot: %w", ctx.Err())
 		}
 	}
 }
