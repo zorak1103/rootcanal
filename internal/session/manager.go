@@ -217,6 +217,8 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 }
 
 func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult, error) {
+	// NOTE: WaitIdleMs peek mode and marker-based completion are implemented in Task 5.
+	// This stub uses the v1 quiesce-based approach regardless of WaitIdleMs.
 	m.mu.RLock()
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()

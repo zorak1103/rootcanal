@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -390,6 +391,76 @@ func TestNewSessionID_Unique(t *testing.T) {
 		}
 		seen[id] = true
 	}
+}
+
+// ---- validateName ----
+
+func TestValidateName(t *testing.T) {
+	cases := []struct {
+		name    string
+		wantErr bool
+	}{
+		{"myservice", false},
+		{"my-service", false},
+		{"my.service", false},
+		{"my_service", false},
+		{"a", false}, // single char valid
+		{"abc123", false},
+		{"a-b.c_d", false},
+		// 63-char max length (1 first char + 62 remaining)
+		{"a" + strings.Repeat("b", 62), false},
+		// Too long: 64 chars
+		{"a" + strings.Repeat("b", 63), true},
+		// Reserved prefix
+		{"s_abc", true},
+		{"s_", true},
+		// Invalid start chars
+		{"-start", true},
+		{".start", true},
+		{"_start", true},
+		{"Uppercase", true},
+		{"", true},
+		// Valid chars in body
+		{"a-1.2_3", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateName(tc.name)
+			if tc.wantErr && err == nil {
+				t.Errorf("validateName(%q): expected error, got nil", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validateName(%q): unexpected error: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// ---- newMarkerNonce ----
+
+func TestNewMarkerNonce_Format(t *testing.T) {
+	nonce := newMarkerNonce()
+	if len(nonce) != 8 {
+		t.Errorf("len(newMarkerNonce()) = %d, want 8", len(nonce))
+	}
+	for _, c := range nonce {
+		if !((c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')) {
+			t.Errorf("newMarkerNonce() contains non-base32 char %q in %q", c, nonce)
+		}
+	}
+}
+
+func TestNewMarkerNonce_PanicOnRandError(t *testing.T) {
+	old := randRead
+	randRead = func(b []byte) (int, error) { return 0, errors.New("rand failed") }
+	t.Cleanup(func() { randRead = old })
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic from newMarkerNonce when rand fails")
+		}
+	}()
+	newMarkerNonce()
 }
 
 // ---- realSSHSession.setOutput ----

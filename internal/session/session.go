@@ -35,7 +35,7 @@ type inflight struct {
 // session holds state for one persistent shell session.
 type session struct {
 	id          string
-	name        string // optional client-supplied name
+	name        string // write-once; set in Open under m.mu, never mutated
 	host        string
 	sshSess     sshSession
 	stdin       io.WriteCloser
