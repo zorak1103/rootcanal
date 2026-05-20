@@ -117,6 +117,27 @@ func TestToolsList(t *testing.T) {
 	}
 }
 
+func TestToolsList_NoCfg(t *testing.T) {
+	// Without a config, only the 7 core tools (session + SFTP) should be registered.
+	mgr := &fakeManager{
+		listFn: func() []session.SessionInfo { return nil },
+	}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	result, err := sess.ListTools(context.Background(), &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if got := len(result.Tools); got != 7 {
+		t.Errorf("expected 7 tools without cfg, got %d", got)
+	}
+	for _, tool := range result.Tools {
+		if tool.Name == "ssh_list_hosts" || tool.Name == "ssh_host_capabilities" {
+			t.Errorf("discovery tool %q should not be registered without cfg", tool.Name)
+		}
+	}
+}
+
 func TestTool_SessionOpen_Success(t *testing.T) {
 	mgr := &fakeManager{
 		openFn: func(_ context.Context, host, name string) (string, error) {

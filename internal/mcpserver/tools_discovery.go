@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -39,7 +40,11 @@ func handleListHosts(cfg *config.Config) func(context.Context, *mcp.CallToolRequ
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 		out := listHostsOut{Hosts: entries}
-		b, _ := json.Marshal(out)
+		b, err := json.Marshal(out)
+		if err != nil {
+			r, _, _ := toolErr(fmt.Errorf("marshal response: %w", err))
+			return r, out, nil
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
 		}, out, nil
@@ -69,16 +74,24 @@ func handleHostCapabilities(cfg *config.Config) func(context.Context, *mcp.CallT
 			r, _, _ := toolErr(err)
 			return r, hostCapOut{}, nil
 		}
+		prefixes := caps.SFTPAllowedPrefixes
+		if prefixes == nil {
+			prefixes = []string{}
+		}
 		out := hostCapOut{
 			SSH:                 caps.SSH,
 			SFTP:                caps.SFTP,
-			SFTPAllowedPrefixes: caps.SFTPAllowedPrefixes,
+			SFTPAllowedPrefixes: prefixes,
 			IdleTimeoutMs:       caps.IdleTimeoutMs,
 			MaxSessionAgeMs:     caps.MaxSessionAgeMs,
 			Term:                caps.Term,
 			CleanOutput:         caps.CleanOutput,
 		}
-		b, _ := json.Marshal(out)
+		b, err := json.Marshal(out)
+		if err != nil {
+			r, _, _ := toolErr(fmt.Errorf("marshal response: %w", err))
+			return r, out, nil
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
 		}, out, nil
