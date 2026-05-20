@@ -43,6 +43,13 @@ func (c *cappedBuffer) String() string {
 	return c.buf.String()
 }
 
+// Truncated reports whether any bytes were discarded due to the cap limit.
+func (c *cappedBuffer) Truncated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.truncated
+}
+
 func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (RunOnceOutput, error) {
 	if m.pool == nil {
 		return RunOnceOutput{}, fmt.Errorf("run_once: no pool configured")
@@ -93,6 +100,9 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 		warnings = append(warnings, fmt.Sprintf("timeout_ms clamped from %d to %d", in.TimeoutMs, maxTimeoutMs))
 		timeoutMs = maxTimeoutMs
 	}
+	if timeoutMs <= 0 {
+		timeoutMs = 30000 // hard fallback if config defaults were not applied
+	}
 
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
@@ -112,7 +122,7 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 	out := RunOnceOutput{
 		Stdout:    stdout.String(),
 		Stderr:    stderr.String(),
-		Truncated: stdout.truncated || stderr.truncated,
+		Truncated: stdout.Truncated() || stderr.Truncated(),
 		Warnings:  warnings,
 	}
 
