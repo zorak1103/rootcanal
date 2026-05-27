@@ -136,6 +136,11 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 			if sig := exitErr.Signal(); sig != "" {
 				out.Signal = sig
 				out.ExitCode = -1
+				out.Warnings = append(out.Warnings,
+					"process terminated by signal "+sig+
+						" — possible causes: network idle timeout (NAT/firewall), OOM kill, "+
+						"explicit signal sent to process. "+
+						"If recurring on commands with no output, set keepalive_interval on the host.")
 			}
 		} else {
 			return out, fmt.Errorf("run_once on %q: %w", host, runErr)

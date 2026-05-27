@@ -27,6 +27,10 @@ const (
 	defaultRunOnceMaxBytes      = int64(1 << 20) // 1 MiB
 	defaultRunOnceMaxTimeoutMs  = 60000          // 60 s
 	defaultMaxRunOnceConcurrent = 16
+
+	// v2.1 additions
+	defaultKeepaliveInterval    = 15 * time.Second
+	defaultKeepaliveMaxFailures = 3
 )
 
 // Config is the top-level configuration.
@@ -53,6 +57,9 @@ type Limits struct {
 	RunOnceMaxBytes      int64  `yaml:"run_once_max_bytes,omitempty"`
 	RunOnceMaxTimeoutMs  int    `yaml:"run_once_max_timeout_ms,omitempty"`
 	MaxRunOnceConcurrent int    `yaml:"max_run_once_concurrent,omitempty"`
+	// v2.1 additions
+	DefaultKeepaliveInterval    time.Duration `yaml:"default_keepalive_interval,omitempty"`
+	DefaultKeepaliveMaxFailures int           `yaml:"default_keepalive_max_failures,omitempty"`
 }
 
 // Host is a pre-declared SSH target.
@@ -68,6 +75,12 @@ type Host struct {
 	// v2.0 additions
 	Term        string `yaml:"term,omitempty"`
 	CleanOutput *bool  `yaml:"clean_output,omitempty"`
+	// KeepaliveInterval overrides the global default. Set to 0 to disable keepalives for this host.
+	// When nil (not set in YAML), the global default is used.
+	KeepaliveInterval *time.Duration `yaml:"keepalive_interval,omitempty"`
+	// KeepaliveMaxFailures overrides the global default. Set to 0 to never disconnect
+	// based on keepalive failures (keepalives are still sent).
+	KeepaliveMaxFailures *int `yaml:"keepalive_max_failures,omitempty"`
 }
 
 // Auth specifies how to authenticate to a host.
@@ -157,6 +170,12 @@ func applyDefaults(cfg *Config) {
 	}
 	if l.MaxRunOnceConcurrent == 0 {
 		l.MaxRunOnceConcurrent = defaultMaxRunOnceConcurrent
+	}
+	if l.DefaultKeepaliveInterval == 0 {
+		l.DefaultKeepaliveInterval = defaultKeepaliveInterval
+	}
+	if l.DefaultKeepaliveMaxFailures == 0 {
+		l.DefaultKeepaliveMaxFailures = defaultKeepaliveMaxFailures
 	}
 
 	for name, h := range cfg.Hosts {

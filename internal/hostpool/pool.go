@@ -17,9 +17,10 @@ import (
 var idleTimeout = 30 * time.Second
 
 type entry struct {
-	client    *ssh.Client
-	refs      int
-	idleTimer *time.Timer
+	client        *ssh.Client
+	refs          int
+	idleTimer     *time.Timer
+	stopKeepalive func()
 }
 
 // Pool holds a ref-counted *ssh.Client per host, creating and closing them on demand.
@@ -38,6 +39,19 @@ func New(cfg *config.Config, d sshconn.Dialer) *Pool {
 		dialer:  d,
 		entries: make(map[string]*entry),
 	}
+}
+
+func (p *Pool) effectiveKeepalive(hostName string) (time.Duration, int) {
+	h := p.cfg.Hosts[hostName]
+	interval := p.cfg.Limits.DefaultKeepaliveInterval
+	maxFails := p.cfg.Limits.DefaultKeepaliveMaxFailures
+	if h.KeepaliveInterval != nil {
+		interval = *h.KeepaliveInterval
+	}
+	if h.KeepaliveMaxFailures != nil {
+		maxFails = *h.KeepaliveMaxFailures
+	}
+	return interval, maxFails
 }
 
 // Get returns a shared *ssh.Client for hostName and a release func the caller
@@ -82,7 +96,12 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 			_ = client.Close()
 			return existing.client, nil
 		}
-		p.entries[hostName] = &entry{client: client, refs: 0}
+		interval, maxFails := p.effectiveKeepalive(hostName)
+		p.entries[hostName] = &entry{
+			client:        client,
+			refs:          0,
+			stopKeepalive: sshconn.StartKeepalive(client, interval, maxFails, nil),
+		}
 		p.mu.Unlock()
 		return client, nil
 	})
@@ -127,6 +146,9 @@ func (p *Pool) releaseFunc(hostName string) func() {
 				p.mu.Lock()
 				if e2, ok := p.entries[hostName]; ok && e2.refs <= 0 {
 					toClose = e2.client
+					if e2.stopKeepalive != nil {
+						e2.stopKeepalive()
+					}
 					delete(p.entries, hostName)
 				}
 				p.mu.Unlock()
@@ -165,6 +187,9 @@ func (p *Pool) Close() {
 	for name, e := range p.entries {
 		if e.idleTimer != nil {
 			e.idleTimer.Stop()
+		}
+		if e.stopKeepalive != nil {
+			e.stopKeepalive()
 		}
 		if e.client != nil {
 			clients = append(clients, e.client)

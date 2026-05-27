@@ -651,6 +651,12 @@ func TestApplyDefaults_NewV2Fields(t *testing.T) {
 	if cfg.Limits.SFTPMaxReadBytes != defaultSFTPMaxReadBytes {
 		t.Errorf("SFTPMaxReadBytes = %d, want %d (2 MiB)", cfg.Limits.SFTPMaxReadBytes, defaultSFTPMaxReadBytes)
 	}
+	if cfg.Limits.DefaultKeepaliveInterval != 15*time.Second {
+		t.Errorf("DefaultKeepaliveInterval = %v, want 15s", cfg.Limits.DefaultKeepaliveInterval)
+	}
+	if cfg.Limits.DefaultKeepaliveMaxFailures != 3 {
+		t.Errorf("DefaultKeepaliveMaxFailures = %d, want 3", cfg.Limits.DefaultKeepaliveMaxFailures)
+	}
 }
 
 func TestCapabilities_TermAndCleanOutput(t *testing.T) {
