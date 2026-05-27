@@ -227,7 +227,7 @@ Reads a file from the remote host via SFTP.
 |---|---|---|---|
 | `host` | string | yes | Must have `sftp_enabled: true` in config |
 | `path` | string | yes | Absolute Unix path (e.g. `/srv/app/config.yaml`) |
-| `max_bytes` | int | no | Capped by server at `sftp_max_read_bytes` (default 5 MiB). 0 → server cap. |
+| `max_bytes` | int | no | Capped by server at `sftp_max_read_bytes` (default 2 MiB). 0 → server cap. |
 
 **Success:**
 ```json

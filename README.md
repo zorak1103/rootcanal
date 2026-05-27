@@ -196,7 +196,7 @@ limits:
   dial_timeout:             10s      # SSH TCP connect timeout
   default_send_timeout_ms:  2000     # ssh_session_send default timeout
   max_send_timeout_ms:     30000     # ssh_session_send hard cap
-  sftp_max_read_bytes:    5242880    # 5 MiB per sftp_read call
+  sftp_max_read_bytes:    2097152    # 2 MiB per sftp_read call (default; raise or lower per your needs)
   sftp_max_write_bytes:  26214400    # 25 MiB per sftp_write call
   # v2.0 additions
   default_term:          dumb        # $TERM advertised to remote shell
