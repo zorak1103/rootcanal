@@ -15,7 +15,7 @@ limits:
   dial_timeout: 10s               # SSH connection timeout
   default_send_timeout_ms: 2000   # default max wait for output per Send call
   max_send_timeout_ms: 30000      # caller-supplied timeout is capped here
-  sftp_max_read_bytes: 5242880    # 5 MiB — largest file sftp_read will return
+  sftp_max_read_bytes: 2097152  # 2 MiB (2 × 1 048 576 bytes) — largest file sftp_read will return inline
   sftp_max_write_bytes: 26214400  # 25 MiB — largest write sftp_write accepts
 
 # Pre-declared hosts. The LLM references these by name (e.g. host: "prod-web").

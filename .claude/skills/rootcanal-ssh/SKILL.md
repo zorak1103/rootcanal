@@ -31,6 +31,10 @@ auth_type, and sftp_enabled. No credentials are ever returned.
 
 To inspect limits and SFTP capabilities for a specific host, call `ssh_host_capabilities`.
 
+> **Note:** `ssh_list_hosts` reflects the config at startup. If the config file changes after
+> rootcanal starts, restart rootcanal to pick up the changes. `ssh_host_capabilities` reads
+> from the same in-memory config — neither is "more live" than the other.
+
 ---
 
 ## For One-shot Reads, Use `ssh_run_once`
@@ -41,6 +45,14 @@ To inspect limits and SFTP capabilities for a specific host, call `ssh_host_capa
 - No open/close ceremony — one call returns stdout, stderr, and exit_code.
 - No PTY: no MOTD, no ANSI, no echo. Output is byte-for-byte what the process wrote.
 - Requires a POSIX-compatible remote shell (`sh`, `bash`, `zsh`, `dash`, `busybox` — not `fish`/`csh`).
+
+**Timeout control:** `ssh_run_once` defaults to 60 000 ms. Pass `timeout_ms` to impose a shorter deadline:
+
+```
+ssh_run_once(host="prod", command="./slow-query.sh", timeout_ms=30000)
+```
+
+Values above 60 000 ms are clamped and reported via `warnings`.
 
 ---
 
@@ -95,6 +107,36 @@ For TUI peeking (vim, top), use `wait_idle_ms` instead of empty input.
 
 ---
 
+## Background Jobs (nohup pattern)
+
+For jobs that run longer than the `ssh_session_send` hard cap (30 s) or the `ssh_run_once`
+max (60 s), use the nohup/logfile/poll pattern:
+
+**Step 1 — start in background, redirect output to a logfile:**
+```
+ssh_run_once(host="prod", command="nohup ./long-job.sh > /tmp/job.log 2>&1 &")
+```
+The command returns quickly. exit_code 0 means the shell handed off to the background
+process — but verify the job started by checking the logfile before polling.
+
+**Step 2 — poll the logfile for a completion marker:**
+```
+# repeat until you see the expected output
+ssh_run_once(host="prod", command="tail -20 /tmp/job.log")
+```
+
+**Caveats:**
+- The logfile must be writable by the SSH user. If the job runs as a different UID, use
+  `sudo tee /tmp/job.log` or redirect to a world-writable path.
+- Define a unique completion marker string in your job (`echo "DONE-OK"`) and poll for it.
+- There is a poll-interval race: the job may finish between polls. Always check final
+  exit code (`echo $? >> /tmp/job.log`) or tail enough lines.
+- Prefer `ssh_run_once` over persistent sessions for polling — it's stateless and cheaper.
+
+→ *(Roadmap: a native `detach` mode with `ssh_job_status` / `ssh_job_cancel` tools is planned. Until then, the nohup pattern above is the recommended approach for long-running jobs.)*
+
+---
+
 ## Hard Rules
 
 **NEVER do any of the following:**
@@ -126,12 +168,13 @@ For TUI peeking (vim, top), use `wait_idle_ms` instead of empty input.
 |---|---|---|
 | Sessions total | 32 | Atomic cap across all hosts |
 | Sessions per host | 4 | Shared with SFTP operations |
-| Send timeout default | 2 000 ms | Override per-call with `timeout_ms` |
-| Send timeout max | 30 000 ms | Hard server cap; higher values reported via `warnings` |
-| run_once timeout max | 60 000 ms | Hard server cap; higher values reported via `warnings` |
+| `ssh_session_send` timeout default | 2 000 ms | Override per-call with `timeout_ms` |
+| `ssh_session_send` timeout max | 30 000 ms | Hard server cap; clamped with `warnings` |
+| `ssh_run_once` timeout default | 60 000 ms | Same as max — set `timeout_ms` only to impose a **shorter** deadline |
+| `ssh_run_once` timeout max | 60 000 ms | Hard server cap; clamped with `warnings` |
 | Output buffer | 1 MiB / session | Ring buffer; overflow → `truncated: true` |
 | run_once stdout/stderr cap | 1 MiB each | `truncated: true` if either stream hits the cap |
-| SFTP read limit | 5 MiB | **Silent truncation — no `truncated` flag on sftp_read!** |
+| SFTP read limit | 2 MiB | ⚠️ Returns content inline in LLM context. Binary = base64 (+33% size). Files >500 KB consume significant tokens; >2 MB are impractical. Use `ssh_run_once` + scp for large transfers. |
 | SFTP write limit | 25 MiB | Server-side rejection before any I/O |
 | Idle timeout | 15 min | GC closes unused sessions |
 | Max session age | 4 h | GC closes regardless of activity |

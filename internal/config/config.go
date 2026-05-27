@@ -19,7 +19,7 @@ const (
 	defaultDialTimeout        = 10 * time.Second
 	defaultSendTimeoutMs      = 2000
 	defaultMaxSendTimeoutMs   = 30000
-	defaultSFTPMaxReadBytes   = 5 << 20  // 5 MiB
+	defaultSFTPMaxReadBytes   = 2 << 20  // 2 MiB
 	defaultSFTPMaxWriteBytes  = 25 << 20 // 25 MiB
 
 	// v2.0 additions

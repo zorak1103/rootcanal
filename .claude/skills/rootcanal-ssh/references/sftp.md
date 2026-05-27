@@ -33,9 +33,15 @@ To allow any path: `sftp_allowed_prefixes: ["/"]` — this must be written delib
 
 ---
 
+> ⚠️ **Context window constraint:** `sftp_read` returns file content inline in the LLM context.
+> Binary files are base64-encoded, inflating size by ~33%. Files larger than ~500 KB may consume
+> significant context tokens; files >2 MB are generally impractical regardless of the server limit.
+> Use `sftp_read` only for small config/text files. For large file transfers, use `ssh_run_once`
+> to invoke `scp`, `rsync`, or similar tools on the remote host.
+
 ## ⚠️ sftp_read: Silent Truncation
 
-`sftp_read` silently truncates at `sftp_max_read_bytes` (default 5 MiB) using `io.LimitReader`.
+`sftp_read` silently truncates at `sftp_max_read_bytes` (default 2 MiB) using `io.LimitReader`.
 There is **no `truncated` flag** in the response — the content just ends.
 
 **Always check file size before reading files that could be large:**
@@ -45,7 +51,7 @@ sftp_list(host, "/path/to/dir")   → inspect "size" in entries
 ssh_session_send: "wc -c /path/to/file\n"
 ```
 
-**If the file is larger than 5 MiB, use the shell instead:**
+**If the file is larger than 2 MiB, use the shell instead:**
 ```
 ssh_session_send: "head -200 /path/to/file\n"
 ssh_session_send: "tail -200 /path/to/file\n"

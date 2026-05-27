@@ -648,6 +648,9 @@ func TestApplyDefaults_NewV2Fields(t *testing.T) {
 	if cfg.Limits.MaxRunOnceConcurrent != defaultMaxRunOnceConcurrent {
 		t.Errorf("MaxRunOnceConcurrent = %d, want %d", cfg.Limits.MaxRunOnceConcurrent, defaultMaxRunOnceConcurrent)
 	}
+	if cfg.Limits.SFTPMaxReadBytes != defaultSFTPMaxReadBytes {
+		t.Errorf("SFTPMaxReadBytes = %d, want %d (2 MiB)", cfg.Limits.SFTPMaxReadBytes, defaultSFTPMaxReadBytes)
+	}
 }
 
 func TestCapabilities_TermAndCleanOutput(t *testing.T) {
