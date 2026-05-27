@@ -29,9 +29,9 @@ lint:
 
 test:
   stage: test
+  # go vet and staticcheck are enforced by the pre-push hook locally.
+  # CI runs only go test + coverage to stay within runner memory limits.
   script:
-    - go vet ./...
-    - go tool staticcheck ./...
     - go test ./... -count=1 -coverprofile=coverage.out -coverpkg=./internal/...
     - go tool cover -func=coverage.out
     - |
