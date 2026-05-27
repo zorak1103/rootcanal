@@ -32,12 +32,7 @@ lint:
 test:
   stage: test
   script:
-    - go test ./... -count=1
-
-cover:
-  stage: test
-  script:
-    - go test ./... -coverprofile=coverage.out -coverpkg=./internal/...
+    - go test ./... -count=1 -coverprofile=coverage.out -coverpkg=./internal/...
     - go tool cover -func=coverage.out
     - |
       pct=$(go tool cover -func=coverage.out | awk '/^total:/{gsub(/%/,"",$NF); print $NF}')
