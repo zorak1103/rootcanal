@@ -29,6 +29,7 @@ lint:
 
 test:
   stage: test
+  tags: [aorus]
   # Coverage and static analysis are enforced locally by the pre-push hook
   # (go vet + staticcheck) and `task cover` (≥85% gate). CI verifies only that
   # tests pass — the heavy -coverpkg=./internal/... flag is omitted to stay
