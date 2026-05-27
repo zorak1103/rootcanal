@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Mirrors CI lint job: go vet + staticcheck on the whole module.
+# Bypass with: git push --no-verify
+set -e
+
+echo "→ go vet ./..."
+go vet ./...
+
+echo "→ staticcheck ./..."
+go tool staticcheck ./...

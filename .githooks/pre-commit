@@ -1,8 +1,9 @@
-#!/bin/sh
-# Mirrors the CI lint check: fail if any tracked .go file needs gofmt -s.
-bad=$(gofmt -s -l $(git ls-files '*.go'))
-if [ -n "$bad" ]; then
-  echo "gofmt -s required for:"
-  echo "$bad"
-  exit 1
-fi
+#!/usr/bin/env bash
+# Auto-fix gofmt on staged .go files so the commit is always formatted.
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+[ -z "$staged" ] && exit 0
+
+gofmt -s -w $staged
+git add $staged
