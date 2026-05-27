@@ -28,7 +28,7 @@ Respond to the user in whatever language they write in. Technical tool names sta
 ## Host Discovery
 
 Call `ssh_list_hosts` to discover available hosts. Each entry includes name, address, user,
-auth_type, and sftp_enabled. No credentials are ever returned.
+auth_type, sftp_enabled, and sftp_allowed_prefixes. No credentials are ever returned.
 
 To inspect limits and SFTP capabilities for a specific host, call `ssh_host_capabilities`.
 
@@ -108,36 +108,6 @@ For TUI peeking (vim, top), use `wait_idle_ms` instead of empty input.
 
 ---
 
-## Background Jobs (nohup pattern)
-
-For jobs that run longer than the `ssh_session_send` hard cap (30 s) or the `ssh_run_once`
-max (60 s), use the nohup/logfile/poll pattern:
-
-**Step 1 — start in background, redirect output to a logfile:**
-```
-ssh_run_once(host="prod", command="nohup ./long-job.sh > /tmp/job.log 2>&1 &")
-```
-The command returns quickly. exit_code 0 means the shell handed off to the background
-process — but verify the job started by checking the logfile before polling.
-
-**Step 2 — poll the logfile for a completion marker:**
-```
-# repeat until you see the expected output
-ssh_run_once(host="prod", command="tail -20 /tmp/job.log")
-```
-
-**Caveats:**
-- The logfile must be writable by the SSH user. If the job runs as a different UID, use
-  `sudo tee /tmp/job.log` or redirect to a world-writable path.
-- Define a unique completion marker string in your job (`echo "DONE-OK"`) and poll for it.
-- There is a poll-interval race: the job may finish between polls. Always check final
-  exit code (`echo $? >> /tmp/job.log`) or tail enough lines.
-- Prefer `ssh_run_once` over persistent sessions for polling — it's stateless and cheaper.
-
-→ *(Roadmap: a native `detach` mode with `ssh_job_status` / `ssh_job_cancel` tools is planned. Until then, the nohup pattern above is the recommended approach for long-running jobs.)*
-
----
-
 ## Hard Rules
 
 **NEVER do any of the following:**
@@ -155,8 +125,9 @@ ssh_run_once(host="prod", command="tail -20 /tmp/job.log")
 - **Leave sessions open.** Always call `ssh_session_close` — even on error paths. Open sessions
   hold a connection-pool slot until the idle GC evicts them (default: 15 min).
 
-- **Overwrite production files without user confirmation.** `sftp_write` is `O_TRUNC` — the
+- **Overwrite production files without user confirmation.** `sftp_write` is `O_TRUNC` by default — the
   original is gone immediately with no backup. Confirm destructive writes explicitly.
+  Use `atomic: true` to write to a temp file first and rename atomically — safe for live config files.
 
 - **Never send a new command while `still_running: true`.** Wait for the in-flight command to
   complete first (send empty input).
