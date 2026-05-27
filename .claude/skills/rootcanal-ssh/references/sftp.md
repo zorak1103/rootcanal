@@ -90,6 +90,27 @@ Setuid/setgid and sticky bits (`04000`, `02000`, `01000`) are **rejected** with 
 
 ---
 
+## Atomic Writes (`atomic`)
+
+`sftp_write` supports an `atomic` parameter that protects live files from partial writes:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `atomic` | bool | no | If `true`, writes to `.<name>.rootcanal.tmp` in the same directory, then renames atomically. The original is untouched if the write fails. Requires write permission on the parent directory. Default: `false`. |
+
+On POSIX systems `rename(2)` is atomic within the same filesystem — the file is either the old
+version or the new version, never empty or partial.
+
+Use `atomic: true` when updating live config files that a running service reads:
+```
+sftp_write(host, "/etc/app/config.yaml", new_content, mode="0644", atomic=true)
+```
+
+> **Orphan cleanup:** If rootcanal crashes mid-atomic-write, a `.*.rootcanal.tmp` file may remain.
+> Clean up with: `find <dir> -name '.*.rootcanal.tmp' -mtime +1 -delete`
+
+---
+
 ## SFTP and Session Limits
 
 SFTP operations share the `max_sessions_per_host` counter (default: 4) with SSH sessions.

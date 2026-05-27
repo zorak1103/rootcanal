@@ -13,12 +13,13 @@ import (
 // ---- ssh_list_hosts ----
 
 type hostEntry struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Address     string `json:"address"`
-	User        string `json:"user"`
-	AuthType    string `json:"auth_type"`
-	SFTPEnabled bool   `json:"sftp_enabled"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description,omitempty"`
+	Address             string   `json:"address"`
+	User                string   `json:"user"`
+	AuthType            string   `json:"auth_type"`
+	SFTPEnabled         bool     `json:"sftp_enabled"`
+	SFTPAllowedPrefixes []string `json:"sftp_allowed_prefixes"`
 }
 
 type listHostsOut struct {
@@ -29,13 +30,18 @@ func handleListHosts(cfg *config.Config) func(context.Context, *mcp.CallToolRequ
 	return func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listHostsOut, error) {
 		entries := make([]hostEntry, 0, len(cfg.Hosts))
 		for name, h := range cfg.Hosts {
+			prefixes := h.SFTPAllowedPrefixes
+			if prefixes == nil {
+				prefixes = []string{}
+			}
 			entries = append(entries, hostEntry{
-				Name:        name,
-				Description: h.Description,
-				Address:     h.Address,
-				User:        h.User,
-				AuthType:    h.Auth.Type,
-				SFTPEnabled: h.SFTPEnabled,
+				Name:                name,
+				Description:         h.Description,
+				Address:             h.Address,
+				User:                h.User,
+				AuthType:            h.Auth.Type,
+				SFTPEnabled:         h.SFTPEnabled,
+				SFTPAllowedPrefixes: prefixes,
 			})
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })

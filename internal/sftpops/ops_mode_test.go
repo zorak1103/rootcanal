@@ -50,7 +50,7 @@ func TestWrite_SpecialModeBitsRejectedAtOpsLayer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.desc, func(t *testing.T) {
-			err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), tt.mode)
+			err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), tt.mode, false)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("mode %04o: expected error, got nil — special bits forwarded to remote", tt.mode)

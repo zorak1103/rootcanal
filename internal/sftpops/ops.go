@@ -29,7 +29,7 @@ type Entry struct {
 // Ops is the interface for SFTP file operations against pre-declared hosts.
 type Ops interface {
 	Read(ctx context.Context, host, path string, maxBytes int) (data []byte, isBinary bool, err error)
-	Write(ctx context.Context, host, path string, content []byte, mode fs.FileMode) error
+	Write(ctx context.Context, host, path string, content []byte, mode fs.FileMode, atomic bool) error
 	List(ctx context.Context, host, path string) ([]Entry, error)
 }
 
@@ -41,6 +41,8 @@ type sftpClientIface interface {
 	OpenFile(path string, flag int) (io.WriteCloser, error)
 	Chmod(path string, mode fs.FileMode) error
 	ReadDir(path string) ([]fs.FileInfo, error)
+	Rename(oldpath, newpath string) error
+	Remove(path string) error
 	Close() error
 }
 
@@ -162,8 +164,8 @@ func (o *ops) Read(ctx context.Context, host, path string, maxBytes int) ([]byte
 	return data, isBinary, nil
 }
 
-func (o *ops) Write(ctx context.Context, host, path string, content []byte, mode fs.FileMode) error {
-	cleanedPath, err := o.validateSFTPPath(host, path)
+func (o *ops) Write(ctx context.Context, host, fpath string, content []byte, mode fs.FileMode, atomicWrite bool) error {
+	cleanedPath, err := o.validateSFTPPath(host, fpath)
 	if err != nil {
 		return err
 	}
@@ -179,19 +181,43 @@ func (o *ops) Write(ctx context.Context, host, path string, content []byte, mode
 	}
 	defer cleanup()
 
-	f, err := sftpClient.OpenFile(cleanedPath, sftpWriteFlags)
+	writePath := cleanedPath
+	if atomicWrite {
+		dir := path.Dir(cleanedPath)
+		base := path.Base(cleanedPath)
+		writePath = dir + "/." + base + ".rootcanal.tmp"
+		// Validate the temp path passes prefix check too.
+		if _, err := o.validateSFTPPath(host, writePath); err != nil {
+			return fmt.Errorf("atomic write: temp path %q not in allowed prefixes: %w", writePath, err)
+		}
+	}
+
+	f, err := sftpClient.OpenFile(writePath, sftpWriteFlags)
 	if err != nil {
-		return fmt.Errorf("opening %q on %q for write: %w", cleanedPath, host, err)
+		return fmt.Errorf("opening %q on %q for write: %w", writePath, host, err)
 	}
 
 	if _, err := f.Write(content); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("writing to %q on %q: %w", cleanedPath, host, err)
+		if atomicWrite {
+			_ = sftpClient.Remove(writePath)
+		}
+		return fmt.Errorf("writing to %q on %q: %w", writePath, host, err)
 	}
 
 	// Close commits the SFTP write; errors here indicate data loss.
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing %q on %q after write: %w", cleanedPath, host, err)
+		if atomicWrite {
+			_ = sftpClient.Remove(writePath)
+		}
+		return fmt.Errorf("closing %q on %q after write: %w", writePath, host, err)
+	}
+
+	if atomicWrite {
+		if err := sftpClient.Rename(writePath, cleanedPath); err != nil {
+			_ = sftpClient.Remove(writePath)
+			return fmt.Errorf("atomic rename %q → %q on %q: %w", writePath, cleanedPath, host, err)
+		}
 	}
 
 	if mode != 0 {

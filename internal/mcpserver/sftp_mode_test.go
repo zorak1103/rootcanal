@@ -30,7 +30,7 @@ func TestSFTPWrite_SpecialModeBitsRejected(t *testing.T) {
 		t.Run(tt.desc, func(t *testing.T) {
 			var capturedMode fs.FileMode
 			ops := &fakeOps{
-				writeFn: func(_ context.Context, _, _ string, _ []byte, mode fs.FileMode) error {
+				writeFn: func(_ context.Context, _, _ string, _ []byte, mode fs.FileMode, _ bool) error {
 					capturedMode = mode
 					return nil
 				},

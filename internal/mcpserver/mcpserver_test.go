@@ -49,15 +49,15 @@ func (f *fakeManager) Shutdown(_ context.Context) error { return nil }
 
 type fakeOps struct {
 	readFn  func(ctx context.Context, host, path string, maxBytes int) ([]byte, bool, error)
-	writeFn func(ctx context.Context, host, path string, content []byte, mode fs.FileMode) error
+	writeFn func(ctx context.Context, host, path string, content []byte, mode fs.FileMode, atomic bool) error
 	listFn  func(ctx context.Context, host, path string) ([]sftpops.Entry, error)
 }
 
 func (f *fakeOps) Read(ctx context.Context, host, path string, maxBytes int) ([]byte, bool, error) {
 	return f.readFn(ctx, host, path, maxBytes)
 }
-func (f *fakeOps) Write(ctx context.Context, host, path string, content []byte, mode fs.FileMode) error {
-	return f.writeFn(ctx, host, path, content, mode)
+func (f *fakeOps) Write(ctx context.Context, host, path string, content []byte, mode fs.FileMode, atomic bool) error {
+	return f.writeFn(ctx, host, path, content, mode, atomic)
 }
 func (f *fakeOps) List(ctx context.Context, host, path string) ([]sftpops.Entry, error) {
 	return f.listFn(ctx, host, path)
@@ -366,7 +366,7 @@ func TestTool_SFTPRead_Error(t *testing.T) {
 func TestTool_SFTPWrite_Success(t *testing.T) {
 	written := false
 	ops := &fakeOps{
-		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error {
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode, _ bool) error {
 			written = true
 			return nil
 		},
@@ -388,9 +388,36 @@ func TestTool_SFTPWrite_Success(t *testing.T) {
 	}
 }
 
+func TestTool_SFTPWrite_AtomicForwarded(t *testing.T) {
+	var capturedAtomic bool
+	ops := &fakeOps{
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode, atomic bool) error {
+			capturedAtomic = atomic
+			return nil
+		},
+	}
+	sess := newTestClient(t, &fakeManager{}, ops, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "sftp_write",
+		Arguments: map[string]any{
+			"host": "h", "path": "/tmp/f.txt", "content": "data", "atomic": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected error: %+v", res.Content)
+	}
+	if !capturedAtomic {
+		t.Error("expected atomic=true to be forwarded to Ops.Write, got false")
+	}
+}
+
 func TestTool_SFTPWrite_InvalidMode(t *testing.T) {
 	ops := &fakeOps{
-		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error {
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode, _ bool) error {
 			return nil
 		},
 	}
@@ -435,7 +462,7 @@ func TestTool_SFTPRead_Binary(t *testing.T) {
 func TestTool_SFTPWrite_Binary(t *testing.T) {
 	var written []byte
 	ops := &fakeOps{
-		writeFn: func(_ context.Context, _, _ string, content []byte, _ fs.FileMode) error {
+		writeFn: func(_ context.Context, _, _ string, content []byte, _ fs.FileMode, _ bool) error {
 			written = append([]byte{}, content...)
 			return nil
 		},
@@ -462,7 +489,7 @@ func TestTool_SFTPWrite_Binary(t *testing.T) {
 
 func TestTool_SFTPWrite_BadBase64(t *testing.T) {
 	ops := &fakeOps{
-		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode, _ bool) error { return nil },
 	}
 	sess := newTestClient(t, &fakeManager{}, ops, nil)
 
@@ -598,7 +625,7 @@ func TestListHosts(t *testing.T) {
 	}
 	sess := newTestClient(t, mgr, &fakeOps{
 		readFn:  func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) { return nil, false, nil },
-		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode, _ bool) error { return nil },
 		listFn:  func(_ context.Context, _, _ string) ([]sftpops.Entry, error) { return nil, nil },
 	}, cfg)
 
@@ -655,7 +682,7 @@ func TestHostCapabilities(t *testing.T) {
 	}
 	sess := newTestClient(t, mgr, &fakeOps{
 		readFn:  func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) { return nil, false, nil },
-		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode, _ bool) error { return nil },
 		listFn:  func(_ context.Context, _, _ string) ([]sftpops.Entry, error) { return nil, nil },
 	}, cfg)
 
@@ -724,7 +751,7 @@ func TestRunOnceTool(t *testing.T) {
 	}
 	sess := newTestClient(t, mgr, &fakeOps{
 		readFn:  func(_ context.Context, _, _ string, _ int) ([]byte, bool, error) { return nil, false, nil },
-		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode) error { return nil },
+		writeFn: func(_ context.Context, _, _ string, _ []byte, _ fs.FileMode, _ bool) error { return nil },
 		listFn:  func(_ context.Context, _, _ string) ([]sftpops.Entry, error) { return nil, nil },
 	}, nil)
 
