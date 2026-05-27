@@ -12,6 +12,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/jobs"
 	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
 	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
@@ -25,6 +26,7 @@ type fakeManager struct {
 	closeFn   func(ctx context.Context, id string) (string, error)
 	listFn    func() []session.SessionInfo
 	runOnceFn func(ctx context.Context, host string, in session.RunOnceInput) (session.RunOnceOutput, error)
+	detachFn  func(ctx context.Context, host string, in session.RunOnceInput, reg session.DetachRegistry) (string, error)
 }
 
 func (f *fakeManager) Open(ctx context.Context, host, name string) (string, error) {
@@ -42,6 +44,12 @@ func (f *fakeManager) RunOnce(ctx context.Context, host string, in session.RunOn
 		return f.runOnceFn(ctx, host, in)
 	}
 	return session.RunOnceOutput{}, fmt.Errorf("RunOnce not configured")
+}
+func (f *fakeManager) Detach(ctx context.Context, host string, in session.RunOnceInput, reg session.DetachRegistry) (string, error) {
+	if f.detachFn != nil {
+		return f.detachFn(ctx, host, in, reg)
+	}
+	return "j_test000000", nil // default: return a fake job ID
 }
 func (f *fakeManager) Shutdown(_ context.Context) error { return nil }
 
@@ -67,7 +75,7 @@ func (f *fakeOps) List(ctx context.Context, host, path string) ([]sftpops.Entry,
 
 func newTestClient(t *testing.T, mgr session.Manager, ops sftpops.Ops, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, ops, cfg, nil)
+	srv := mcpserver.New(mgr, ops, cfg, nil, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -578,7 +586,7 @@ func TestOnInitialized_IsCalled(t *testing.T) {
 	called := make(chan struct{}, 1)
 	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
 
-	srv := mcpserver.New(mgr, nil, nil, func(_ *mcp.ServerSession) {
+	srv := mcpserver.New(mgr, nil, nil, nil, func(_ *mcp.ServerSession) {
 		called <- struct{}{}
 	})
 	t1, t2 := mcp.NewInMemoryTransports()
@@ -779,6 +787,64 @@ func TestRunOnceTool(t *testing.T) {
 	}
 	if out.Stdout != "total 0\n" {
 		t.Errorf("stdout = %q", out.Stdout)
+	}
+}
+
+func TestTool_RunOnce_DetachReturnsJobID(t *testing.T) {
+	mgr := &fakeManager{
+		detachFn: func(_ context.Context, host string, in session.RunOnceInput, _ session.DetachRegistry) (string, error) {
+			if host != "myhost" {
+				return "", fmt.Errorf("unexpected host %q", host)
+			}
+			return "j_abc123def456", nil
+		},
+	}
+	reg := jobs.NewRegistry(10, time.Minute)
+	t.Cleanup(reg.Close)
+
+	srv := mcpserver.New(mgr, nil, nil, reg, nil)
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go func() { _ = srv.Run(ctx, t1) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
+	sess, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ssh_run_once",
+		Arguments: map[string]any{
+			"host":    "myhost",
+			"command": "sleep 30",
+			"detach":  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ssh_run_once(detach=true): %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %v", res.Content)
+	}
+	if len(res.Content) == 0 {
+		t.Fatal("expected content in response")
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	var out map[string]any
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	jobID, ok := out["job_id"].(string)
+	if !ok || jobID == "" {
+		t.Errorf("expected non-empty job_id in response, got: %v", out)
+	}
+	if jobID != "j_abc123def456" {
+		t.Errorf("job_id = %q, want j_abc123def456", jobID)
 	}
 }
 

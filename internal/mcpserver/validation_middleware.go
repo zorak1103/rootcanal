@@ -19,9 +19,11 @@ var toolFields = map[string][]string{
 	"sftp_read":             {"host", "path", "max_bytes"},
 	"sftp_write":            {"host", "path", "content", "binary", "mode", "atomic"},
 	"sftp_list":             {"host", "path"},
-	"ssh_run_once":          {"host", "command", "stdin", "env", "timeout_ms"},
+	"ssh_run_once":          {"host", "command", "stdin", "env", "timeout_ms", "detach"},
 	"ssh_list_hosts":        {},
 	"ssh_host_capabilities": {"host"},
+	"ssh_job_status":        {"job_id"},
+	"ssh_job_cancel":        {"job_id"},
 }
 
 // levenshtein returns the edit distance between a and b (case-insensitive).

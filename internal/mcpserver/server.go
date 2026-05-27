@@ -5,6 +5,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/jobs"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
 	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
 	"gitlab.com/zorak1103/rootcanal/internal/version"
@@ -14,9 +15,12 @@ import (
 //
 // cfg, if non-nil, enables the discovery tools (ssh_list_hosts, ssh_host_capabilities).
 //
+// reg, if non-nil, enables the job tools (ssh_job_status, ssh_job_cancel) and
+// the detach mode for ssh_run_once.
+//
 // onInitialized, if non-nil, is called once the MCP session handshake completes
 // so the caller can swap in an mcp.NewLoggingHandler to route logs to the client.
-func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, onInitialized func(*mcp.ServerSession)) *mcp.Server {
+func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Registry, onInitialized func(*mcp.ServerSession)) *mcp.Server {
 	opts := &mcp.ServerOptions{}
 	if onInitialized != nil {
 		opts.InitializedHandler = func(_ context.Context, req *mcp.InitializedRequest) {
@@ -71,8 +75,21 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, onInitialized
 	// Run-once tool (always registered)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ssh_run_once",
-		Description: "Execute a single command on a pre-declared host via SSH exec channel (no PTY). Returns stdout, stderr, and exit_code. Use this for one-shot reads (df, ls, docker inspect, cat) instead of open/send/close. Requires a POSIX-compatible remote shell.",
-	}, handleRunOnce(mgr))
+		Description: "Execute a single command on a pre-declared host via SSH exec channel (no PTY). Returns stdout, stderr, and exit_code. Use detach=true to run in background and get a job_id. Use this for one-shot reads (df, ls, docker inspect, cat) instead of open/send/close. Requires a POSIX-compatible remote shell.",
+	}, handleRunOnce(mgr, reg))
+
+	// Job tools (available when reg is provided)
+	if reg != nil {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "ssh_job_status",
+			Description: "Poll the status and output tail of a detached job started with ssh_run_once(detach=true). Returns running state, elapsed time, exit code, and stdout/stderr tails.",
+		}, handleJobStatus(reg))
+
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "ssh_job_cancel",
+			Description: "Cancel a running detached job by job_id. Sends SIGTERM to the remote process.",
+		}, handleJobCancel(reg))
+	}
 
 	// Discovery tools (available when cfg is provided)
 	if cfg != nil {
