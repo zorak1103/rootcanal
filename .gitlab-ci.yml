@@ -6,21 +6,14 @@ stages:
   - release
 
 variables:
-  GOMODCACHE: "$CI_PROJECT_DIR/.go/pkg/mod"
-  GOPATH: "$CI_PROJECT_DIR/.go"
+  GOFLAGS: "-mod=vendor"
   GO_VERSION: "1.26"
 
 default:
   image: golang:${GO_VERSION}
   tags: [private]
-  before_script:
-    - export PATH="${GOPATH}/bin:${PATH}"
-  cache:
-    key:
-      files:
-        - go.sum
-    paths:
-      - .go/pkg/mod/
+  before_script: []
+  cache: {}
 
 lint:
   stage: verify

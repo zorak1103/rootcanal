@@ -2,7 +2,7 @@
 # Auto-fix gofmt on staged .go files so the commit is always formatted.
 set -e
 
-staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' | grep -v '^vendor/' || true)
 [ -z "$staged" ] && exit 0
 
 gofmt -s -w $staged
