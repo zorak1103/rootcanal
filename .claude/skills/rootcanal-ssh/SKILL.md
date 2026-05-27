@@ -4,7 +4,8 @@ description: >
   SSH session management and SFTP file access via the rootcanal MCP server
   (tools: mcp__rootcanal__ssh_session_open, mcp__rootcanal__ssh_session_send,
   mcp__rootcanal__ssh_session_close, mcp__rootcanal__ssh_session_list,
-  mcp__rootcanal__ssh_run_once, mcp__rootcanal__ssh_list_hosts,
+  mcp__rootcanal__ssh_run_once, mcp__rootcanal__ssh_job_status,
+  mcp__rootcanal__ssh_job_cancel, mcp__rootcanal__ssh_list_hosts,
   mcp__rootcanal__ssh_host_capabilities, mcp__rootcanal__sftp_read,
   mcp__rootcanal__sftp_write, mcp__rootcanal__sftp_list).
   Use whenever the user asks to: connect to an SSH host, run remote shell commands,
@@ -17,7 +18,7 @@ description: >
 # rootcanal SSH
 
 rootcanal is a stdio MCP server for persistent PTY-based SSH sessions and SFTP file access.
-All 10 tools are restricted to hosts declared in the operator config — the LLM cannot supply
+All tools are restricted to hosts declared in the operator config — the LLM cannot supply
 raw addresses or ports.
 
 Respond to the user in whatever language they write in. Technical tool names stay in English.
@@ -180,6 +181,50 @@ ssh_run_once(host="prod", command="tail -20 /tmp/job.log")
 | Max session age | 4 h | GC closes regardless of activity |
 | `closed_reason` values | `"exit"` `"lost"` `"idle"` `"max_age"` `"shutdown"` `"explicit"` | Non-empty = session is dead |
 | Pool idle (after close) | 30 s | Underlying SSH client lingers briefly |
+
+---
+
+## Background Jobs
+
+### Native detach (recommended)
+
+For jobs that run longer than `ssh_run_once`'s 60 s maximum, use detach mode:
+
+**Step 1 — start in background:**
+```
+ssh_run_once(host="prod", command="./backup.sh", detach=true)
+→ { "job_id": "j_abc123f4d2e1", "host": "prod" }
+```
+
+**Step 2 — poll for completion:**
+```
+ssh_job_status(job_id="j_abc123f4d2e1")
+→ { "running": true, "elapsed_s": 47, "stdout_tail": "Exporting table 3 of 12..." }
+
+ssh_job_status(job_id="j_abc123f4d2e1")
+→ { "running": false, "elapsed_s": 183, "exit_code": 0, "stdout_tail": "Backup complete." }
+```
+
+**Cancel a running job:**
+```
+ssh_job_cancel(job_id="j_abc123f4d2e1")
+→ { "canceled": true, "was_running": true }
+```
+
+Jobs expire 1 hour after completion. After expiry, `ssh_job_status` returns "not found".
+
+### Fallback: nohup pattern (survives rootcanal restart)
+
+The in-memory job registry does not survive rootcanal restarts. For long-running processes that must outlive the MCP server, use the nohup pattern via a persistent session:
+
+```
+ssh_session_open(host="prod")                         → { session_id }
+ssh_session_send(session_id, "nohup ./long-task.sh &> /tmp/task.log &\n")
+ssh_session_send(session_id, "echo $!\n")             → PID
+ssh_session_close(session_id)
+```
+
+Poll progress via `ssh_run_once` or a new session reading `/tmp/task.log`.
 
 ---
 

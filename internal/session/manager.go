@@ -34,6 +34,16 @@ type SessionInfo struct {
 	StillRunning bool
 }
 
+// DetachRegistry is the minimal jobs.Registry surface needed by Detach.
+// Defined here (not in the jobs package) to avoid an import cycle.
+type DetachRegistry interface {
+	TryRegister(host, command string, pid int) (string, error)
+	SetCancel(id string, fn func())
+	MarkDone(id string, exitCode *int)
+	AppendStdout(id string, data []byte)
+	AppendStderr(id string, data []byte)
+}
+
 // Manager manages persistent SSH shell sessions.
 type Manager interface {
 	Open(ctx context.Context, host, name string) (id string, err error)
@@ -41,6 +51,7 @@ type Manager interface {
 	Close(ctx context.Context, id string) (closedReason string, err error)
 	List() []SessionInfo
 	RunOnce(ctx context.Context, host string, in RunOnceInput) (RunOnceOutput, error)
+	Detach(ctx context.Context, host string, in RunOnceInput, reg DetachRegistry) (jobID string, err error)
 	Shutdown(ctx context.Context) error
 }
 

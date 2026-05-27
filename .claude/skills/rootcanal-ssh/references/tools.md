@@ -70,8 +70,9 @@ Executes a command on the remote host via a non-PTY exec channel. No session ope
 | `stdin` | string | no | Data to pipe to the command's stdin. |
 | `env` | object | no | Key/value environment variables. May be silently rejected by remote `AcceptEnv` policy. |
 | `timeout_ms` | int | no | 0 → server default (config `run_once_max_timeout_ms`, default 60 000 ms). Values above the server cap are clamped and reported via `warnings`. |
+| `detach` | bool | no | Default `false`. If `true`, start the command in the background and return a `job_id` immediately. Use `ssh_job_status` to poll progress and `ssh_job_cancel` to cancel. |
 
-**Success:**
+**Success (synchronous, detach=false):**
 ```json
 {
   "stdout": "Filesystem      Size  Used Avail Use% Mounted on\n...",
@@ -83,6 +84,14 @@ Executes a command on the remote host via a non-PTY exec channel. No session ope
 }
 ```
 
+**Success (detach=true):**
+```json
+{
+  "job_id": "j_abc123f4d2e1",
+  "host": "prod-web"
+}
+```
+
 - `exit_code`: always present. `0` = success, non-zero = failure, `-1` = killed by signal.
 - `signal`: non-empty when process was killed by a signal (e.g. `"TERM"`).
 - `truncated`: `true` if stdout OR stderr hit the per-stream cap (default 1 MiB each).
@@ -90,9 +99,73 @@ Executes a command on the remote host via a non-PTY exec channel. No session ope
 
 **Errors:**
 - `"unknown host \"<name>\""` — name not in config
+- `"job registry full (N/N active jobs)"` — `max_jobs` (default 32) reached; wait for jobs to finish or cancel some
 - SSH handshake / knownhosts errors (see error-handling.md)
 
 **No PTY:** no MOTD, no ANSI escape sequences, no echo. Output is byte-for-byte what the process wrote.
+
+---
+
+## ssh_job_status
+
+Polls the status and output tail of a detached job started with `ssh_run_once(detach=true)`.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `job_id` | string | yes | Job ID returned by `ssh_run_once` with `detach=true`. |
+
+**Success:**
+```json
+{
+  "running": true,
+  "elapsed_s": 47,
+  "stdout_tail": "Exporting table 3 of 12...",
+  "stderr_tail": ""
+}
+```
+
+When finished:
+```json
+{
+  "running": false,
+  "elapsed_s": 183,
+  "exit_code": 0,
+  "stdout_tail": "Backup complete.",
+  "stderr_tail": ""
+}
+```
+
+- `running`: `true` if still executing.
+- `elapsed_s`: seconds since the job started (or from start to finish).
+- `exit_code`: present only when `running: false` and the process exited normally. Absent if killed by signal.
+- `stdout_tail` / `stderr_tail`: last 4 KiB of each stream. Full output (up to 64 KiB each) accumulates in the registry.
+
+**Errors:** `"job \"<id>\" not found (expired or never existed)"` — the job TTL elapsed (default 1 h after finish) or the ID is wrong.
+
+---
+
+## ssh_job_cancel
+
+Cancels a running detached job by sending SIGTERM to the remote process.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `job_id` | string | yes | Job ID returned by `ssh_run_once` with `detach=true`. |
+
+**Success:**
+```json
+{
+  "canceled": true,
+  "was_running": true
+}
+```
+
+- `canceled`: `true` if SIGTERM was sent (job was still running).
+- `was_running`: `true` if the job was running at the moment of the call.
+
+If the job already finished, `canceled: false` and `was_running: false` are returned (not an error).
+
+**Errors:** `"job \"<id>\" not found"` — expired or never existed.
 
 ---
 

@@ -31,6 +31,10 @@ const (
 	// v2.1 additions
 	defaultKeepaliveInterval    = 15 * time.Second
 	defaultKeepaliveMaxFailures = 3
+
+	// job registry
+	defaultJobTTL  = time.Hour
+	defaultMaxJobs = 32
 )
 
 // Config is the top-level configuration.
@@ -60,6 +64,8 @@ type Limits struct {
 	// v2.1 additions
 	DefaultKeepaliveInterval    time.Duration `yaml:"default_keepalive_interval,omitempty"`
 	DefaultKeepaliveMaxFailures int           `yaml:"default_keepalive_max_failures,omitempty"`
+	JobTTL                      time.Duration `yaml:"job_ttl,omitempty"`
+	MaxJobs                     int           `yaml:"max_jobs,omitempty"`
 }
 
 // Host is a pre-declared SSH target.
@@ -176,6 +182,12 @@ func applyDefaults(cfg *Config) {
 	}
 	if l.DefaultKeepaliveMaxFailures == 0 {
 		l.DefaultKeepaliveMaxFailures = defaultKeepaliveMaxFailures
+	}
+	if l.JobTTL == 0 {
+		l.JobTTL = defaultJobTTL
+	}
+	if l.MaxJobs == 0 {
+		l.MaxJobs = defaultMaxJobs
 	}
 
 	for name, h := range cfg.Hosts {
