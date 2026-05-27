@@ -29,6 +29,8 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, onInitialized
 		Version: version.Version,
 	}, opts)
 
+	srv.AddReceivingMiddleware(fieldSuggestionMiddleware())
+
 	// Session tools
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ssh_session_open",
