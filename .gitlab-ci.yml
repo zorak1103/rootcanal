@@ -12,6 +12,7 @@ variables:
 
 default:
   image: golang:${GO_VERSION}
+  tags: [private]
   before_script:
     - export PATH="${GOPATH}/bin:${PATH}"
   cache:
