@@ -18,7 +18,8 @@ default:
 lint:
   stage: verify
   script:
-    - test -z "$(gofmt -s -l $(git ls-files '*.go'))" || (gofmt -s -l $(git ls-files '*.go') && exit 1)
+    - FILES=$(git ls-files '*.go' | grep -v '^vendor/')
+    - test -z "$(gofmt -s -l $FILES)" || (gofmt -s -l $FILES && exit 1)
 
 test:
   stage: test
