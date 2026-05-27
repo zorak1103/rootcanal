@@ -57,6 +57,7 @@ type sftpWriteIn struct {
 	Content string `json:"content"          jsonschema:"file content; base64-encode binary data and set binary=true"`
 	Binary  bool   `json:"binary,omitempty" jsonschema:"set to true when content is base64-encoded"`
 	Mode    string `json:"mode,omitempty"   jsonschema:"Unix file permissions in octal notation e.g. '0644' or '755'; omit to keep default"`
+	Atomic  bool   `json:"atomic,omitempty" jsonschema:"if true, write to a temp file first then rename atomically — safe for updating live config files"`
 }
 
 func handleSFTPWrite(ops sftpops.Ops) func(context.Context, *mcp.CallToolRequest, sftpWriteIn) (*mcp.CallToolResult, any, error) {
@@ -84,7 +85,7 @@ func handleSFTPWrite(ops sftpops.Ops) func(context.Context, *mcp.CallToolRequest
 			mode = fs.FileMode(n)
 		}
 
-		if err := ops.Write(ctx, in.Host, in.Path, content, mode); err != nil {
+		if err := ops.Write(ctx, in.Host, in.Path, content, mode, in.Atomic); err != nil {
 			return toolErr(err)
 		}
 

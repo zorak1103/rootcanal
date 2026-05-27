@@ -42,12 +42,14 @@ func errPool(err error) poolGetter {
 // ---- fake sftpClientIface ----
 
 type fakeFS struct {
-	files    map[string][]byte
-	dirs     map[string][]fs.FileInfo
-	openErr  error
-	writeErr error
-	chmodErr error
-	listErr  error
+	files     map[string][]byte
+	dirs      map[string][]fs.FileInfo
+	openErr   error
+	writeErr  error
+	chmodErr  error
+	listErr   error
+	renameErr error
+	removeErr error
 }
 
 func newFakeFS() *fakeFS {
@@ -89,6 +91,27 @@ func (f *fakeFS) ReadDir(path string) ([]fs.FileInfo, error) {
 }
 
 func (f *fakeFS) Close() error { return nil }
+
+func (f *fakeFS) Rename(oldpath, newpath string) error {
+	if f.renameErr != nil {
+		return f.renameErr
+	}
+	data, ok := f.files[oldpath]
+	if !ok {
+		return os.ErrNotExist
+	}
+	f.files[newpath] = data
+	delete(f.files, oldpath)
+	return nil
+}
+
+func (f *fakeFS) Remove(path string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	delete(f.files, path)
+	return nil
+}
 
 // captureBuf captures Write calls and stores them in fakeFS on Close.
 type captureBuf struct {
@@ -250,7 +273,7 @@ func TestWrite_Success(t *testing.T) {
 	ffs := newFakeFS()
 	o := newTestOps(minCfg(), okPool(nil), ffs)
 
-	err := o.Write(context.Background(), "h", "/tmp/out.txt", []byte("hello"), 0)
+	err := o.Write(context.Background(), "h", "/tmp/out.txt", []byte("hello"), 0, false)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -263,7 +286,7 @@ func TestWrite_WithMode(t *testing.T) {
 	ffs := newFakeFS()
 	o := newTestOps(minCfg(), okPool(nil), ffs)
 
-	err := o.Write(context.Background(), "h", "/tmp/script.sh", []byte("#!/bin/sh"), 0755)
+	err := o.Write(context.Background(), "h", "/tmp/script.sh", []byte("#!/bin/sh"), 0755, false)
 	if err != nil {
 		t.Fatalf("Write with mode: %v", err)
 	}
@@ -274,7 +297,7 @@ func TestWrite_ChmodError(t *testing.T) {
 	ffs.chmodErr = errors.New("chmod failed")
 	o := newTestOps(minCfg(), okPool(nil), ffs)
 
-	err := o.Write(context.Background(), "h", "/tmp/f.sh", []byte("x"), 0755)
+	err := o.Write(context.Background(), "h", "/tmp/f.sh", []byte("x"), 0755, false)
 	if err == nil {
 		t.Fatal("expected chmod error")
 	}
@@ -285,7 +308,7 @@ func TestWrite_SizeLimitExceeded(t *testing.T) {
 	cfg.Limits.SFTPMaxWriteBytes = 4
 
 	o := newTestOps(cfg, okPool(nil), newFakeFS())
-	err := o.Write(context.Background(), "h", "/tmp/big.bin", bytes.Repeat([]byte("x"), 5), 0)
+	err := o.Write(context.Background(), "h", "/tmp/big.bin", bytes.Repeat([]byte("x"), 5), 0, false)
 	if err == nil {
 		t.Fatal("expected size limit error")
 	}
@@ -293,7 +316,7 @@ func TestWrite_SizeLimitExceeded(t *testing.T) {
 
 func TestWrite_PoolError(t *testing.T) {
 	o := newTestOps(minCfg(), errPool(errors.New("no conn")), newFakeFS())
-	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0)
+	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0, false)
 	if err == nil {
 		t.Fatal("expected pool error")
 	}
@@ -303,7 +326,7 @@ func TestWrite_OpenFileError(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.writeErr = errors.New("read only filesystem")
 	o := newTestOps(minCfg(), okPool(nil), ffs)
-	err := o.Write(context.Background(), "h", "/etc/locked", []byte("x"), 0)
+	err := o.Write(context.Background(), "h", "/etc/locked", []byte("x"), 0, false)
 	if err == nil {
 		t.Fatal("expected open error")
 	}
@@ -467,7 +490,7 @@ func TestValidateSFTPPath_Write_Disabled(t *testing.T) {
 		Hosts:  map[string]config.Host{"h": {Address: "h:22", User: "u", SFTPEnabled: false}},
 	}
 	o := newTestOps(cfg, okPool(nil), newFakeFS())
-	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0)
+	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0, false)
 	if err == nil || !containsStr(err.Error(), "not enabled") {
 		t.Fatalf("expected SFTP-disabled error, got: %v", err)
 	}
@@ -590,7 +613,7 @@ func TestOps_SFTPIntegration(t *testing.T) {
 
 	// Write a file via SFTP.
 	testFile := filepath.Join(dir, "hello.txt")
-	if err := ops.Write(context.Background(), "sftp-test", testFile, []byte("hello sftp\n"), 0); err != nil {
+	if err := ops.Write(context.Background(), "sftp-test", testFile, []byte("hello sftp\n"), 0, false); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -633,5 +656,63 @@ func TestOpenSFTP_NewClientError(t *testing.T) {
 	_, _, err := o.Read(context.Background(), "h", "/f", 0)
 	if err == nil {
 		t.Fatal("expected newClient error to propagate")
+	}
+}
+
+// ---- Atomic write tests ----
+
+func TestWrite_Atomic_HappyPath(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/etc/app/config.yaml"] = []byte("old content")
+	// minCfg uses sftp_allowed_prefixes: ["/"] — allows any absolute path.
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	err := o.Write(context.Background(), "h", "/etc/app/config.yaml", []byte("new content"), 0, true)
+	if err != nil {
+		t.Fatalf("Write(atomic): %v", err)
+	}
+	if string(ffs.files["/etc/app/config.yaml"]) != "new content" {
+		t.Errorf("target file = %q, want new content", ffs.files["/etc/app/config.yaml"])
+	}
+	for k := range ffs.files {
+		if strings.HasSuffix(k, ".rootcanal.tmp") {
+			t.Errorf("temp file %q was not removed after successful atomic write", k)
+		}
+	}
+}
+
+func TestWrite_Atomic_WriteError_OriginalUntouched(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/etc/app/config.yaml"] = []byte("original")
+	ffs.writeErr = errors.New("disk full")
+	// minCfg uses sftp_allowed_prefixes: ["/"] — allows any absolute path.
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	err := o.Write(context.Background(), "h", "/etc/app/config.yaml", []byte("new"), 0, true)
+	if err == nil {
+		t.Fatal("expected error from failed write")
+	}
+	if string(ffs.files["/etc/app/config.yaml"]) != "original" {
+		t.Errorf("original file was mutated on write error: %q", ffs.files["/etc/app/config.yaml"])
+	}
+}
+
+func TestWrite_Atomic_RenameError_TempRemoved(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/etc/app/config.yaml"] = []byte("original")
+	ffs.renameErr = errors.New("rename failed")
+	// minCfg uses sftp_allowed_prefixes: ["/"] — allows any absolute path.
+	o := newTestOps(minCfg(), okPool(nil), ffs)
+	err := o.Write(context.Background(), "h", "/etc/app/config.yaml", []byte("new"), 0, true)
+	if err == nil {
+		t.Fatal("expected error from rename failure")
+	}
+	// Original must be untouched.
+	if string(ffs.files["/etc/app/config.yaml"]) != "original" {
+		t.Errorf("original file was mutated: %q", ffs.files["/etc/app/config.yaml"])
+	}
+	// Temp file must be cleaned up after the rename error.
+	for k := range ffs.files {
+		if strings.HasSuffix(k, ".rootcanal.tmp") {
+			t.Errorf("temp file %q was not removed after rename error", k)
+		}
 	}
 }
