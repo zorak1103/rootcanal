@@ -30,16 +30,12 @@ lint:
 test:
   stage: test
   tags: [aorus]
-  variables:
-    GOMAXPROCS: "2"
-    GOFLAGS: "-p=1"
-    GOGC: "50"
   # Coverage and static analysis are enforced locally by the pre-push hook
   # (go vet + staticcheck) and `task cover` (≥85% gate). CI verifies only that
   # tests pass — the heavy -coverpkg=./internal/... flag is omitted to stay
   # within runner memory limits.
   script:
-    - go test -count=1 -parallel 2 ./...
+    - go test -count=1 ./...
 
 build:
   stage: build
