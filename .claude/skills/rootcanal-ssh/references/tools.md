@@ -363,3 +363,47 @@ Lists directory contents on the remote host via SFTP.
 ```
 
 Use `size` from entries to check file sizes before `sftp_read` to avoid silent truncation.
+
+---
+
+## ssh_accept_host_key
+
+Inspects or re-trusts a changed SSH host key after a server rebuild. Two-step flow: preview first, then confirm with the user.
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `host` | string | yes | Must have `allow_known_hosts_update: true` in config |
+| `confirm` | bool | no | `false`/omitted = preview only; `true` = rewrite known_hosts |
+| `expected_fingerprint` | string | if confirm=true | The `new_fingerprint` from the preview call |
+
+**Preview (confirm omitted or false):**
+```json
+{
+  "host": "web1",
+  "current_fingerprint": "SHA256:abc…",
+  "new_fingerprint": "SHA256:xyz…",
+  "changed": true,
+  "known_hosts": "/home/user/.ssh/known_hosts",
+  "message": "Host key has changed. Verify with the server operator …"
+}
+```
+
+**Confirm (confirm=true, expected_fingerprint=<new_fingerprint>):**
+```json
+{
+  "host": "web1",
+  "new_fingerprint": "SHA256:xyz…",
+  "known_hosts": "/home/user/.ssh/known_hosts",
+  "refreshed": true
+}
+```
+
+**Required workflow:**
+1. Call without `confirm` → show both fingerprints to the user.
+2. User confirms server was legitimately rebuilt.
+3. Call with `confirm=true` and `expected_fingerprint=<new_fingerprint>`.
+4. Retry the original failing tool call.
+
+**`refreshed: false`** means the key was already current — no write occurred.
+
+**Gating:** The host must have `allow_known_hosts_update: true` in the rootcanal config. Without it the tool returns an error. Enable only for ephemeral/rebuildable hosts; leave bastion hosts and production databases at the default `false`.
