@@ -25,6 +25,18 @@ Every host must have a `known_hosts` entry. rootcanal uses `golang.org/x/crypto/
 
 `InsecureIgnoreHostKey` is not exposed as an option.
 
+#### Controlled host-key refresh (opt-in)
+
+The `ssh_accept_host_key` tool provides an in-MCP path to re-trust a changed host key after a legitimate server rebuild. This is **not TOFU** — it requires explicit operator opt-in:
+
+1. **Per-host gate:** The host must have `allow_known_hosts_update: true` in config. Absent this flag, the tool refuses with an error. Every host defaults to `false`.
+2. **Preview step:** The first call (without `confirm`) scans the live key and returns both the stored and new fingerprints. No write occurs.
+3. **Human confirmation:** The operator reviews the fingerprint change and confirms the rebuild was legitimate.
+4. **Fingerprint echo:** The confirm call must include `expected_fingerprint` matching the value from the preview. The entry is only rewritten if the live key still matches it, closing the TOCTOU window.
+5. **Surgical write:** Only the matching key type's line is replaced; all other entries (including other hosts in a shared `~/.ssh/known_hosts`) are preserved. The file is rewritten atomically with `0600` permissions.
+
+`InsecureIgnoreHostKey` remains unexposed. All other hosts — and the default state of opted-in hosts — continue to use strict `known_hosts` verification.
+
 ### 3. No plaintext secrets in config
 
 The config schema has `password_env` and `passphrase_env` fields (environment variable *names*), not `password` or `passphrase` fields (values). The YAML decoder is configured with `KnownFields(true)` so any attempt to add a `password: secret` key is rejected at parse time with an explicit error.

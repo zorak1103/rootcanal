@@ -13,6 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/hostkeys"
 	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
 	"gitlab.com/zorak1103/rootcanal/internal/jobs"
 	"gitlab.com/zorak1103/rootcanal/internal/logging"
@@ -78,8 +79,9 @@ func main() {
 	ops := sftpops.New(cfg, pool)
 	jobReg := jobs.NewRegistry(cfg.Limits.MaxJobs, cfg.Limits.JobTTL)
 	defer jobReg.Close()
+	hk := hostkeys.New(cfg, sshconn.ProdScanner{})
 
-	srv := mcpserver.New(mgr, ops, cfg, jobReg, func(ss *mcp.ServerSession) {
+	srv := mcpserver.New(mgr, ops, cfg, jobReg, hk, func(ss *mcp.ServerSession) {
 		mcpH := mcp.NewLoggingHandler(ss, &mcp.LoggingHandlerOptions{
 			LoggerName:  "rootcanal",
 			MinInterval: 100 * time.Millisecond,

@@ -146,9 +146,9 @@ For TUI peeking (vim, top), use `wait_idle_ms` instead of empty input.
 - **Invent host names.** Only use names present in the config or returned by `ssh_list_hosts`.
   An unknown name returns `"unknown host \"<name>\""` — do not retry with guesses; ask the user.
 
-- **Blindly refresh known_hosts without verifying the cause.** A key mismatch means the server
-  key changed. Before running `ssh-keygen -R` + `ssh-keyscan`, confirm with the user that the
-  server was rebuilt or reprovisioned, not compromised. See [references/error-handling.md](references/error-handling.md).
+- **Blindly re-trust a host on key mismatch.** A key mismatch means the server key changed.
+  Use `ssh_accept_host_key` (preview step first, then confirm with user) — never skip the confirmation.
+  Requires `allow_known_hosts_update: true` on the host in config. See [references/error-handling.md](references/error-handling.md).
 
 - **Leave sessions open.** Always call `ssh_session_close` — even on error paths. Open sessions
   hold a connection-pool slot until the idle GC evicts them (default: 15 min).

@@ -95,6 +95,9 @@ type Host struct {
 	// KeepaliveMaxFailures overrides the global default. Set to 0 to never disconnect
 	// based on keepalive failures (keepalives are still sent).
 	KeepaliveMaxFailures *int `yaml:"keepalive_max_failures,omitempty"`
+	// AllowKnownHostsUpdate permits the ssh_accept_host_key MCP tool to rewrite
+	// this host's known_hosts entry after a server rebuild. Default false.
+	AllowKnownHostsUpdate bool `yaml:"allow_known_hosts_update,omitempty"`
 }
 
 // Auth specifies how to authenticate to a host.

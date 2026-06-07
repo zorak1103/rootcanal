@@ -13,20 +13,20 @@ the full format may include wrapping like `"connecting to \"<host>\": SSH handsh
 
 ---
 
-### `"SSH handshake failed: ... knownhosts: key mismatch"`
+### `"SSH handshake failed: ... key mismatch"` (or `host key mismatch`)
 **Cause:** The server presented a host key that differs from the stored `known_hosts` entry.
 **What it means:** The server was rebuilt (new key), the IP was reassigned, or — less likely — a MITM.
 
-**Required action:**
-1. **Ask the user** to confirm the cause before modifying `known_hosts`.
-2. If confirmed server rebuild/reprovision:
-   ```bash
-   ssh-keygen -R <host>                         # remove old entry
-   ssh-keyscan -H <host> >> ~/.ssh/known_hosts  # accept new key
-   ```
-3. Retry `ssh_session_open`.
+**Recovery using `ssh_accept_host_key` (in-MCP, requires `allow_known_hosts_update: true` on the host):**
 
-Never run `ssh-keyscan` without user confirmation — accepting a malicious key would be silent.
+1. Call `ssh_accept_host_key(host="<name>")` — returns `current_fingerprint`, `new_fingerprint`, `changed`.
+2. Present both fingerprints to the user and ask them to confirm the server was legitimately rebuilt.
+3. Only after user confirmation, call `ssh_accept_host_key(host="<name>", confirm=true, expected_fingerprint="<new_fingerprint>")`.
+4. The `known_hosts` entry is rewritten; the original tool call can now succeed.
+
+**If `allow_known_hosts_update` is not set on the host**, the tool refuses. The operator must add the flag to the host's config and restart rootcanal. Only enable it for hosts that may be rebuilt (ephemeral VMs, test servers) — leave it off for bastion hosts and production databases.
+
+Never accept a changed key without user confirmation — a mismatch you cannot explain may indicate a MITM.
 
 ---
 

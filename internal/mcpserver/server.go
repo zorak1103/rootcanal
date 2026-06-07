@@ -5,6 +5,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"gitlab.com/zorak1103/rootcanal/internal/hostkeys"
 	"gitlab.com/zorak1103/rootcanal/internal/jobs"
 	"gitlab.com/zorak1103/rootcanal/internal/session"
 	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
@@ -24,9 +25,11 @@ import (
 // reg, if non-nil, enables the job tools (ssh_job_status, ssh_job_cancel) and
 // the detach mode for ssh_run_once.
 //
+// hk, if non-nil, enables the ssh_accept_host_key tool (also requires cfg != nil).
+//
 // onInitialized, if non-nil, is called once the MCP session handshake completes
 // so the caller can swap in an mcp.NewLoggingHandler to route logs to the client.
-func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Registry, onInitialized func(*mcp.ServerSession)) *mcp.Server {
+func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Registry, hk hostkeys.Refresher, onInitialized func(*mcp.ServerSession)) *mcp.Server {
 	opts := &mcp.ServerOptions{}
 	if onInitialized != nil {
 		opts.InitializedHandler = func(_ context.Context, req *mcp.InitializedRequest) {
@@ -108,6 +111,18 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Reg
 			Name:        "ssh_host_capabilities",
 			Description: "Return what rootcanal can do on a specific host: SSH, SFTP, allowed SFTP path prefixes, session idle timeout, and terminal/output settings.",
 		}, handleHostCapabilities(cfg))
+	}
+
+	// Host-key refresh tool (requires both cfg and hk)
+	if cfg != nil && hk != nil {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name: "ssh_accept_host_key",
+			Description: "Inspect or re-trust a changed SSH host key after a server rebuild. " +
+				"Call without confirm to preview the current and new key fingerprints. " +
+				"Call with confirm=true and expected_fingerprint=<new_fingerprint> to rewrite " +
+				"the known_hosts entry. Requires allow_known_hosts_update: true on the host. " +
+				"Only use after a human has confirmed the server was legitimately rebuilt.",
+		}, handleAcceptHostKey(hk))
 	}
 
 	// Skill resources and tool (always registered)

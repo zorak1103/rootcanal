@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `ssh_accept_host_key` MCP tool: preview and re-trust a changed SSH host key after a server rebuild. Requires `allow_known_hosts_update: true` per-host. Two-step flow: preview returns both fingerprints; confirm (with `expected_fingerprint` echo) rewrites the known_hosts entry atomically. Closes #14.
+- Per-host `allow_known_hosts_update` config field (default `false`). Enables `ssh_accept_host_key` for that host.
+- Key-mismatch error from `ProdDialer` now includes a hint pointing to `ssh_accept_host_key` and `allow_known_hosts_update`.
+
+---
+
 ## [2.0.0] — 2026-05-20
 
 ### Breaking changes

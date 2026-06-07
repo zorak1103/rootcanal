@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,12 +114,12 @@ func TestResolveKnownHosts(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	sysPath := filepath.Join(home, ".ssh", "known_hosts")
 
-	if got := resolveKnownHosts("system"); got != sysPath {
-		t.Errorf("resolveKnownHosts(system) = %q, want %q", got, sysPath)
+	if got := ResolveKnownHosts("system"); got != sysPath {
+		t.Errorf("ResolveKnownHosts(system) = %q, want %q", got, sysPath)
 	}
 	explicit := "/etc/ssh/known_hosts"
-	if got := resolveKnownHosts(explicit); got != explicit {
-		t.Errorf("resolveKnownHosts(%q) = %q, want %q", explicit, got, explicit)
+	if got := ResolveKnownHosts(explicit); got != explicit {
+		t.Errorf("ResolveKnownHosts(%q) = %q, want %q", explicit, got, explicit)
 	}
 }
 
@@ -241,6 +242,39 @@ func TestBuildClientConfig_HostKeyMismatch(t *testing.T) {
 	// Config itself is valid; mismatch only fires on actual connection.
 	if cfg.User != "u" {
 		t.Errorf("User = %q, want %q", cfg.User, "u")
+	}
+}
+
+func TestDial_KeyMismatchHint(t *testing.T) {
+	addr, _ := startTestSSHServer(t)
+
+	// Write a *different* key into known_hosts — produces a real mismatch on dial.
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(priv)
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "mismatch_kh")
+	line := knownhosts.Line([]string{knownhosts.Normalize(addr)}, signer.PublicKey())
+	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
+
+	t.Setenv("TEST_KH_MISMATCH_PASS", "x")
+	h := config.Host{
+		Address:    addr,
+		User:       "u",
+		KnownHosts: khPath,
+		Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_KH_MISMATCH_PASS"},
+	}
+	limits := config.Limits{DialTimeout: 2 * time.Second}
+
+	_, err := ProdDialer{}.Dial(context.Background(), h, limits)
+	if err == nil {
+		t.Fatal("expected key mismatch error")
+	}
+	errStr := err.Error()
+	if !strings.Contains(errStr, "ssh_accept_host_key") {
+		t.Errorf("error missing ssh_accept_host_key hint; got: %s", errStr)
+	}
+	if !strings.Contains(errStr, "allow_known_hosts_update") {
+		t.Errorf("error missing allow_known_hosts_update hint; got: %s", errStr)
 	}
 }
 

@@ -75,7 +75,7 @@ func (f *fakeOps) List(ctx context.Context, host, path string) ([]sftpops.Entry,
 
 func newTestClient(t *testing.T, mgr session.Manager, ops sftpops.Ops, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, ops, cfg, nil, nil)
+	srv := mcpserver.New(mgr, ops, cfg, nil, nil, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -586,7 +586,7 @@ func TestOnInitialized_IsCalled(t *testing.T) {
 	called := make(chan struct{}, 1)
 	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
 
-	srv := mcpserver.New(mgr, nil, nil, nil, func(_ *mcp.ServerSession) {
+	srv := mcpserver.New(mgr, nil, nil, nil, nil, func(_ *mcp.ServerSession) {
 		called <- struct{}{}
 	})
 	t1, t2 := mcp.NewInMemoryTransports()
@@ -801,7 +801,7 @@ func TestTool_RunOnce_DetachReturnsJobID(t *testing.T) {
 	reg := jobs.NewRegistry(10, time.Minute)
 	t.Cleanup(reg.Close)
 
-	srv := mcpserver.New(mgr, nil, nil, reg, nil)
+	srv := mcpserver.New(mgr, nil, nil, reg, nil, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -856,7 +856,7 @@ func containsStr(b []byte, s string) bool {
 // newTestClientWithReg is like newTestClient but also wires a jobs.Registry.
 func newTestClientWithReg(t *testing.T, mgr session.Manager, reg *jobs.Registry) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, nil, nil, reg, nil)
+	srv := mcpserver.New(mgr, nil, nil, reg, nil, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
