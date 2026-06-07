@@ -93,10 +93,7 @@ secret to the LLM provider's infrastructure. Consume secrets at the shell layer 
 `ssh_list_hosts`. An unknown name returns `"unknown host \"<name>\""` — do not retry with
 guesses. Ask the user which host they meant.
 
-**Never blindly refresh known_hosts on a key mismatch.** A host key mismatch means the server
-key changed. Before running `ssh-keygen -R` and `ssh-keyscan`, confirm with the user that the
-server was rebuilt or reprovisioned. A mismatch you cannot explain may indicate a compromised
-server or a man-in-the-middle condition.
+**Never blindly re-trust a host on a key mismatch.** A host key mismatch means the server key changed. Confirm with the user that the server was rebuilt or reprovisioned before taking any action. Use `ssh_accept_host_key` (requires `allow_known_hosts_update: true` on the host) for in-MCP recovery — never bypass the confirmation step. A mismatch you cannot explain may indicate a compromised server or a man-in-the-middle condition.
 
 **Always call ssh_session_close, even on error paths.** Open sessions hold a connection-pool
 slot until the idle GC evicts them (default: 15 min). Leaked sessions consume capacity from
@@ -118,7 +115,7 @@ a new command while the session is blocked returns an error.
 |---|---|---|
 | `"session not found"` | Session expired or was closed. | Call `ssh_session_list` to inventory open sessions; reopen if needed. |
 | `"unknown host \"<name>\""` | Host name not in config. | Call `ssh_list_hosts` to see valid names; do not guess. |
-| `"host key mismatch"` | Remote host key changed. | Confirm server identity with user before refreshing `known_hosts`. |
+| `"host key mismatch"` | Remote host key changed. | Use `ssh_accept_host_key` to preview fingerprints, then confirm with user before accepting. Requires `allow_known_hosts_update: true`. |
 | `"path not allowed"` | Path outside `sftp_allowed_prefixes`. | Call `ssh_host_capabilities` to check configured prefixes. |
 | `"sftp not enabled"` | Host has `sftp_enabled: false`. | Inform user; no workaround available without config change. |
 

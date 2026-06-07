@@ -17,7 +17,7 @@ import (
 // algorithm list pinned to the entry stored for hostport. Pinning prevents a
 // server from negotiating a weaker algorithm than the one the key was recorded with.
 func hostKeyCallback(h config.Host, hostport string) (ssh.HostKeyCallback, []string, error) {
-	path := resolveKnownHosts(h.KnownHosts)
+	path := ResolveKnownHosts(h.KnownHosts)
 	if err := fileperms.Check(path); err != nil {
 		return nil, nil, err
 	}
@@ -59,8 +59,8 @@ func (dummyKey) Type() string                            { return ssh.KeyAlgoED2
 func (dummyKey) Marshal() []byte                         { return make([]byte, 51) } // 51 = wire-format for empty ed25519 key
 func (dummyKey) Verify(_ []byte, _ *ssh.Signature) error { return fmt.Errorf("dummy key") }
 
-// resolveKnownHosts converts the "system" sentinel to ~/.ssh/known_hosts.
-func resolveKnownHosts(s string) string {
+// ResolveKnownHosts converts the "system" sentinel to ~/.ssh/known_hosts.
+func ResolveKnownHosts(s string) string {
 	if s == "system" {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, ".ssh", "known_hosts")

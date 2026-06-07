@@ -36,6 +36,7 @@ MCP client ──(stdio MCP)──▶ rootcanal ──(SSH sessions)──▶ re
 | `ssh_run_once` | Execute a single command via SSH exec channel (no PTY); returns stdout, stderr, exit_code |
 | `ssh_list_hosts` | List all pre-declared hosts with non-sensitive metadata (no credentials) |
 | `ssh_host_capabilities` | Return SSH/SFTP caps, session limits, and terminal settings for a host |
+| `ssh_accept_host_key` | Preview and re-trust a changed SSH host key after a server rebuild. Preview returns both fingerprints; confirm (with `expected_fingerprint`) rewrites the entry. Requires `allow_known_hosts_update: true` on the host. |
 
 ## Installation
 
@@ -214,6 +215,7 @@ SFTP access is **disabled by default** and controlled by two per-host config fie
 |---|---|---|---|
 | `sftp_enabled` | bool | `false` | Must be `true` for any SFTP tool call to succeed on this host |
 | `sftp_allowed_prefixes` | list of strings | `[]` | Absolute Unix paths the LLM may access. Empty list denies all paths. |
+| `allow_known_hosts_update` | bool | `false` | Permit `ssh_accept_host_key` to rewrite this host's known_hosts entry after a server rebuild. Requires the preview→confirm flow; see `docs/security.md`. |
 
 Three validation layers are applied to every `sftp_read`, `sftp_write`, and `sftp_list` call:
 

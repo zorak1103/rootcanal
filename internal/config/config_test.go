@@ -462,6 +462,41 @@ func TestValidate_KnownHostsErrors(t *testing.T) {
 	}
 }
 
+func TestHost_AllowKnownHostsUpdateDefaultsFalse(t *testing.T) {
+	cfg := &Config{Hosts: map[string]Host{
+		"h": {Address: "h:22", User: "u", KnownHosts: "system", Auth: Auth{Type: "agent"}},
+	}}
+	if cfg.Hosts["h"].AllowKnownHostsUpdate {
+		t.Error("AllowKnownHostsUpdate should default to false")
+	}
+}
+
+func TestLoad_AllowKnownHostsUpdate(t *testing.T) {
+	dir := t.TempDir()
+	kh := filepath.Join(dir, "kh")
+	_ = os.WriteFile(kh, []byte(""), 0600)
+	cfgFile := filepath.Join(dir, "rc.yaml")
+	// Use forward slashes in YAML content to avoid backslash escape issues on Windows.
+	khYAML := filepath.ToSlash(kh)
+	content := fmt.Sprintf(`
+hosts:
+  web1:
+    address: "h:22"
+    user: u
+    auth: {type: agent}
+    known_hosts: "%s"
+    allow_known_hosts_update: true
+`, khYAML)
+	_ = os.WriteFile(cfgFile, []byte(content), 0600)
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Hosts["web1"].AllowKnownHostsUpdate {
+		t.Error("AllowKnownHostsUpdate should be true after loading config")
+	}
+}
+
 // ---- normalizeAddress tests ----
 
 func TestNormalizeAddress(t *testing.T) {

@@ -2,12 +2,14 @@ package sshconn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 
 	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // Dialer opens SSH client connections.
@@ -44,6 +46,15 @@ func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits)
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, h.Address, cfg)
 	if err != nil {
 		_ = conn.Close()
+		var kerr *knownhosts.KeyError
+		if errors.As(err, &kerr) && len(kerr.Want) > 0 {
+			return nil, fmt.Errorf(
+				"SSH handshake failed (host key mismatch for %q): %w — "+
+					"the server may have been rebuilt. "+
+					"Use ssh_accept_host_key to inspect and re-trust the new key "+
+					"(host must have allow_known_hosts_update: true in config)",
+				h.Address, err)
+		}
 		return nil, fmt.Errorf("SSH handshake failed: %w", err)
 	}
 
