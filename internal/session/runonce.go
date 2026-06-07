@@ -8,8 +8,69 @@ import (
 	"sync"
 	"time"
 
+	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"golang.org/x/crypto/ssh"
 )
+
+// drainGrace is the extra window given to a still-draining output stream after
+// the wall-clock deadline fires. If the remote process already exited and the
+// SSH library is merely copying buffered bytes, this window lets sess.Run
+// return the real exit code rather than having us send SIGTERM and lose it.
+const drainGrace = 2 * time.Second
+
+// runClassification is the structured outcome of classifyRunResult.
+type runClassification struct {
+	ExitCode  int
+	Signal    string
+	Warnings  []string
+	HardError bool // true means the caller must return a wrapped error, not a result
+}
+
+// classifyRunResult translates the exit-info fields extracted from a sess.Run
+// error into RunOnce output fields. The parameters are:
+//   - exitCode: ExitStatus() from *ssh.ExitError, or 0 on clean success
+//   - signal:   Signal()     from *ssh.ExitError, or "" if none
+//   - isExitErr: true when err was nil (success) or *ssh.ExitError; false for hard IO errors
+//   - killedByDeadline: true when the run harness itself sent the SIGTERM
+//   - timeoutMs: the configured wall-clock cap in milliseconds (used in warnings)
+func classifyRunResult(exitCode int, signal string, isExitErr bool, killedByDeadline bool, timeoutMs int) runClassification {
+	if !isExitErr {
+		return runClassification{HardError: true}
+	}
+	if signal == "" {
+		// Clean exit (nil error or ExitError with a status code but no signal).
+		return runClassification{ExitCode: exitCode}
+	}
+	// Process was terminated by a signal.
+	w := runClassification{ExitCode: -1, Signal: signal}
+	if killedByDeadline {
+		w.Warnings = append(w.Warnings, fmt.Sprintf(
+			"process exceeded the %d ms wall-clock timeout and was terminated (SIGTERM); "+
+				"it was still running at the deadline. "+
+				"Increase timeout_ms or use detach=true for long-running commands.", timeoutMs))
+	} else {
+		w.Warnings = append(w.Warnings,
+			"process terminated by signal "+signal+
+				" — possible causes: network idle timeout (NAT/firewall), OOM kill, "+
+				"explicit signal sent to process. "+
+				"If recurring on commands with no output, set keepalive_interval on the host.")
+	}
+	return w
+}
+
+// extractExitCode unpacks a sess.Run / sess.Wait error into the flat fields
+// consumed by classifyRunResult. It is intentionally thin — all decision logic
+// lives in classifyRunResult so it can be unit-tested without a real SSH server.
+func extractExitCode(err error) (exitCode int, signal string, isExitErr bool) {
+	if err == nil {
+		return 0, "", true
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitStatus(), exitErr.Signal(), true
+	}
+	return 0, "", false
+}
 
 // cappedBuffer is an io.Writer that discards bytes past the capacity limit.
 type cappedBuffer struct {
@@ -56,7 +117,7 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 		return RunOnceOutput{}, fmt.Errorf("run_once: no pool configured")
 	}
 	if _, ok := m.cfg.Hosts[host]; !ok {
-		return RunOnceOutput{}, fmt.Errorf("unknown host %q", host)
+		return RunOnceOutput{}, config.UnknownHostError(host)
 	}
 
 	client, release, err := m.pool.Get(ctx, host)
@@ -111,13 +172,24 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 	runDone := make(chan error, 1)
 	go func() { runDone <- sess.Run(in.Command) }()
 
-	var runErr error
+	var (
+		runErr           error
+		killedByDeadline bool
+	)
 	select {
 	case runErr = <-runDone:
 	case <-runCtx.Done():
-		_ = sess.Signal(ssh.SIGTERM)
-		_ = sess.Close()
-		runErr = <-runDone
+		// Deadline fired. The process may have already exited and the SSH library
+		// is still draining buffered output (issue #15). Give the drain a short
+		// grace window before forcibly sending SIGTERM.
+		select {
+		case runErr = <-runDone:
+		case <-time.After(drainGrace):
+			killedByDeadline = true
+			_ = sess.Signal(ssh.SIGTERM)
+			_ = sess.Close()
+			runErr = <-runDone
+		}
 	}
 
 	out := RunOnceOutput{
@@ -127,25 +199,14 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 		Warnings:  warnings,
 	}
 
-	if runErr == nil {
-		out.ExitCode = 0
-	} else {
-		var exitErr *ssh.ExitError
-		if errors.As(runErr, &exitErr) {
-			out.ExitCode = exitErr.ExitStatus()
-			if sig := exitErr.Signal(); sig != "" {
-				out.Signal = sig
-				out.ExitCode = -1
-				out.Warnings = append(out.Warnings,
-					"process terminated by signal "+sig+
-						" — possible causes: network idle timeout (NAT/firewall), OOM kill, "+
-						"explicit signal sent to process. "+
-						"If recurring on commands with no output, set keepalive_interval on the host.")
-			}
-		} else {
-			return out, fmt.Errorf("run_once on %q: %w", host, runErr)
-		}
+	exitCode, signal, isExitErr := extractExitCode(runErr)
+	c := classifyRunResult(exitCode, signal, isExitErr, killedByDeadline, timeoutMs)
+	if c.HardError {
+		return out, fmt.Errorf("run_once on %q: %w", host, runErr)
 	}
+	out.ExitCode = c.ExitCode
+	out.Signal = c.Signal
+	out.Warnings = append(out.Warnings, c.Warnings...)
 
 	return out, nil
 }

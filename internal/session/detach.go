@@ -8,8 +8,34 @@ import (
 	"sync"
 	"time"
 
+	"gitlab.com/zorak1103/rootcanal/internal/config"
 	"golang.org/x/crypto/ssh"
 )
+
+// resolveDetachTimeout returns the wall-clock deadline (in ms) for a detached
+// job. Unlike RunOnce, detached jobs are not bounded by the 60 s synchronous
+// cap (RunOnceMaxTimeoutMs). They use a separate, much larger ceiling
+// (DetachMaxDurationMs, default 24 h) so that genuinely long-running tasks
+// can complete naturally.
+//
+// Rules:
+//   - reqMs ≤ 0 → use maxMs (the configured ceiling)
+//   - reqMs > 0 && reqMs ≤ maxMs → use reqMs
+//   - reqMs > maxMs (and maxMs > 0) → clamp to maxMs
+//   - maxMs ≤ 0 → no cap configured; use reqMs if positive, else 86400000 (safety fallback)
+func resolveDetachTimeout(reqMs, maxMs int) int {
+	const fallback = 24 * 60 * 60 * 1000 // 24 h safety fallback
+	if maxMs <= 0 {
+		if reqMs > 0 {
+			return reqMs
+		}
+		return fallback
+	}
+	if reqMs <= 0 || reqMs > maxMs {
+		return maxMs
+	}
+	return reqMs
+}
 
 // Detach starts a command via SSH exec (no PTY), registers it with the job
 // registry, and returns immediately. The background goroutine streams
@@ -24,20 +50,13 @@ func (m *manager) Detach(ctx context.Context, host string, in RunOnceInput, reg 
 		return "", fmt.Errorf("detach: no pool configured")
 	}
 	if _, ok := m.cfg.Hosts[host]; !ok {
-		return "", fmt.Errorf("unknown host %q", host)
+		return "", config.UnknownHostError(host)
 	}
 
-	// Resolve timeout (same logic as RunOnce).
-	timeoutMs := in.TimeoutMs
-	if timeoutMs <= 0 {
-		timeoutMs = m.cfg.Limits.RunOnceMaxTimeoutMs
-	}
-	if m.cfg.Limits.RunOnceMaxTimeoutMs > 0 && timeoutMs > m.cfg.Limits.RunOnceMaxTimeoutMs {
-		timeoutMs = m.cfg.Limits.RunOnceMaxTimeoutMs
-	}
-	if timeoutMs <= 0 {
-		timeoutMs = 60000
-	}
+	// Detached jobs use DetachMaxDurationMs (default 24 h) as their ceiling,
+	// not the 60 s RunOnceMaxTimeoutMs cap. This lets detached jobs run to
+	// natural completion without being killed at the synchronous wall-clock limit.
+	timeoutMs := resolveDetachTimeout(in.TimeoutMs, m.cfg.Limits.DetachMaxDurationMs)
 
 	client, release, err := m.pool.Get(ctx, host)
 	if err != nil {

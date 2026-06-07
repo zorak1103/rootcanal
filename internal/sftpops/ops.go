@@ -88,7 +88,7 @@ func defaultNewClient(c *ssh.Client) (sftpClientIface, error) {
 func (o *ops) validateSFTPPath(host, in string) (string, error) {
 	h, ok := o.cfg.Hosts[host]
 	if !ok {
-		return "", fmt.Errorf("unknown host %q", host)
+		return "", config.UnknownHostError(host)
 	}
 	if !h.SFTPEnabled {
 		return "", fmt.Errorf("host %q: SFTP not enabled", host)
