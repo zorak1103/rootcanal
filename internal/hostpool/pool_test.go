@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -441,5 +442,105 @@ func TestPool_LostRace_CapExceeded(t *testing.T) {
 	_, _, err := p.Get(context.Background(), "srv")
 	if err == nil {
 		t.Fatal("expected cap-exceeded error on lost-race path")
+	}
+}
+
+func TestPool_KeepaliveEviction_ReDialsAfterDeath(t *testing.T) {
+	// After keepalive declares a connection dead, the next Get must re-dial.
+	addr, khPath := startSSHServer(t)
+	t.Setenv("TEST_KA_EVICT_PASS", "irrelevant")
+
+	var dialCount atomic.Int32
+	d := &funcDialer{fn: func(ctx context.Context, h config.Host, l config.Limits) (*ssh.Client, error) {
+		dialCount.Add(1)
+		return sshconn.ProdDialer{}.Dial(ctx, h, l)
+	}}
+
+	cfg := minCfg(map[string]config.Host{
+		"srv": {Address: addr, User: "u", KnownHosts: khPath,
+			Auth: config.Auth{Type: "password", PasswordEnv: "TEST_KA_EVICT_PASS"}},
+	})
+	p := New(cfg, d)
+	t.Cleanup(p.Close)
+
+	// First Get — dials once.
+	_, release1, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get 1: %v", err)
+	}
+	if dialCount.Load() != 1 {
+		t.Fatalf("expected 1 dial after first Get, got %d", dialCount.Load())
+	}
+
+	// Simulate keepalive declaring the connection dead.
+	p.mu.Lock()
+	e := p.entries["srv"]
+	p.mu.Unlock()
+	e.onDead()
+
+	// Entry must now be gone.
+	p.mu.Lock()
+	_, stillThere := p.entries["srv"]
+	p.mu.Unlock()
+	if stillThere {
+		t.Error("pool entry should be evicted after onDead()")
+	}
+
+	// Second Get must re-dial (dial count rises to 2).
+	_, release2, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get 2: %v", err)
+	}
+	if dialCount.Load() != 2 {
+		t.Fatalf("expected 2 dials after eviction+Get, got %d", dialCount.Load())
+	}
+
+	release1()
+	release2()
+}
+
+func TestPool_StaleRelease_NoOp(t *testing.T) {
+	// A release() from a session on an evicted entry must not corrupt the
+	// replacement entry's refcount.
+	addr, khPath := startSSHServer(t)
+	t.Setenv("TEST_STALE_REL_PASS", "irrelevant")
+
+	cfg := minCfg(map[string]config.Host{
+		"srv": {Address: addr, User: "u", KnownHosts: khPath,
+			Auth: config.Auth{Type: "password", PasswordEnv: "TEST_STALE_REL_PASS"}},
+	})
+	p := New(cfg, sshconn.ProdDialer{})
+	t.Cleanup(p.Close)
+
+	// Get a client and hold its release func.
+	_, staleRelease, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get 1: %v", err)
+	}
+
+	// Evict via onDead.
+	p.mu.Lock()
+	e := p.entries["srv"]
+	p.mu.Unlock()
+	e.onDead()
+
+	// Get a replacement client (refs = 1).
+	_, release2, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get 2 after eviction: %v", err)
+	}
+	defer release2()
+
+	// Stale release must be a no-op — must not decrement replacement's refs.
+	staleRelease()
+
+	p.mu.Lock()
+	cur, ok := p.entries["srv"]
+	p.mu.Unlock()
+	if !ok {
+		t.Fatal("replacement entry should still exist after stale release")
+	}
+	if cur.refs != 1 {
+		t.Errorf("expected replacement refs=1 after stale release, got %d", cur.refs)
 	}
 }

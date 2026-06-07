@@ -21,6 +21,9 @@ type entry struct {
 	refs          int
 	idleTimer     *time.Timer
 	stopKeepalive func()
+	// onDead is the eviction closure passed to StartKeepalive. Stored on the
+	// entry so tests can fire it directly to simulate keepalive failure.
+	onDead func()
 }
 
 // Pool holds a ref-counted *ssh.Client per host, creating and closing them on demand.
@@ -75,7 +78,7 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 		e.refs++
 		client := e.client
 		p.mu.Unlock()
-		return client, p.releaseFunc(hostName), nil
+		return client, p.releaseFunc(hostName, e), nil
 	}
 	p.mu.Unlock()
 
@@ -97,11 +100,22 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 			return existing.client, nil
 		}
 		interval, maxFails := p.effectiveKeepalive(hostName)
-		p.entries[hostName] = &entry{
-			client:        client,
-			refs:          0,
-			stopKeepalive: sshconn.StartKeepalive(client, interval, maxFails, nil),
+		e := &entry{client: client, refs: 0}
+		// Build the eviction closure before starting keepalive so that e is
+		// fully initialized before any goroutine can reference it.
+		evict := func() {
+			p.mu.Lock()
+			if cur, ok := p.entries[hostName]; ok && cur == e {
+				if cur.idleTimer != nil {
+					cur.idleTimer.Stop()
+				}
+				delete(p.entries, hostName)
+			}
+			p.mu.Unlock()
 		}
+		e.onDead = evict
+		e.stopKeepalive = sshconn.StartKeepalive(client, interval, maxFails, nil, evict)
+		p.entries[hostName] = e
 		p.mu.Unlock()
 		return client, nil
 	})
@@ -127,16 +141,21 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 	client := e.client
 	p.mu.Unlock()
 
-	return client, p.releaseFunc(hostName), nil
+	return client, p.releaseFunc(hostName, e), nil
 }
 
-func (p *Pool) releaseFunc(hostName string) func() {
+// releaseFunc returns a func that decrements the refcount for the specific pool
+// entry e. If e has been evicted and replaced (e.g. by a keepalive-triggered
+// reconnect), the release is a safe no-op — it never touches the replacement.
+func (p *Pool) releaseFunc(hostName string, e *entry) func() {
 	return func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 
-		e, ok := p.entries[hostName]
-		if !ok {
+		cur, ok := p.entries[hostName]
+		if !ok || cur != e {
+			// Entry was evicted or replaced; this release belongs to the old
+			// connection and must not touch the current pool state.
 			return
 		}
 		e.refs--
@@ -144,10 +163,12 @@ func (p *Pool) releaseFunc(hostName string) func() {
 			e.idleTimer = time.AfterFunc(idleTimeout, func() {
 				var toClose *ssh.Client
 				p.mu.Lock()
-				if e2, ok := p.entries[hostName]; ok && e2.refs <= 0 {
-					toClose = e2.client
-					if e2.stopKeepalive != nil {
-						e2.stopKeepalive()
+				// Identity check: only evict if the entry hasn't been replaced
+				// by a concurrent Get between now and when the timer fired.
+				if cur2, ok2 := p.entries[hostName]; ok2 && cur2 == e && cur2.refs <= 0 {
+					toClose = cur2.client
+					if cur2.stopKeepalive != nil {
+						cur2.stopKeepalive()
 					}
 					delete(p.entries, hostName)
 				}
