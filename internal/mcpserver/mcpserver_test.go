@@ -115,19 +115,19 @@ func TestToolsList(t *testing.T) {
 		"ssh_session_close", "ssh_session_list",
 		"sftp_read", "sftp_write", "sftp_list",
 		"ssh_list_hosts", "ssh_host_capabilities",
-		"ssh_run_once",
+		"ssh_run_once", "get_skill",
 	} {
 		if !names[expected] {
 			t.Errorf("missing tool %q", expected)
 		}
 	}
-	if got := len(result.Tools); got != 10 {
-		t.Errorf("expected 10 tools, got %d", got)
+	if got := len(result.Tools); got != 11 {
+		t.Errorf("expected 11 tools, got %d", got)
 	}
 }
 
 func TestToolsList_NoCfg(t *testing.T) {
-	// Without a config, the 8 core tools (session + SFTP + ssh_run_once) should be registered.
+	// Without a config, the 9 core tools (session + SFTP + ssh_run_once + get_skill) should be registered.
 	mgr := &fakeManager{
 		listFn: func() []session.SessionInfo { return nil },
 	}
@@ -137,8 +137,8 @@ func TestToolsList_NoCfg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if got := len(result.Tools); got != 8 {
-		t.Errorf("expected 8 tools without cfg, got %d", got)
+	if got := len(result.Tools); got != 9 {
+		t.Errorf("expected 9 tools without cfg, got %d", got)
 	}
 	names := make(map[string]bool)
 	for _, tool := range result.Tools {
@@ -591,8 +591,7 @@ func TestOnInitialized_IsCalled(t *testing.T) {
 	})
 	t1, t2 := mcp.NewInMemoryTransports()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go func() { _ = srv.Run(ctx, t1) }()
 
@@ -850,4 +849,405 @@ func TestTool_RunOnce_DetachReturnsJobID(t *testing.T) {
 
 func containsStr(b []byte, s string) bool {
 	return strings.Contains(string(b), s)
+}
+
+// ---- job tool helpers ----
+
+// newTestClientWithReg is like newTestClient but also wires a jobs.Registry.
+func newTestClientWithReg(t *testing.T, mgr session.Manager, reg *jobs.Registry) *mcp.ClientSession {
+	t.Helper()
+	srv := mcpserver.New(mgr, nil, nil, reg, nil)
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go func() { _ = srv.Run(ctx, t1) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
+	sess, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	return sess
+}
+
+// ---- ssh_job_status tests ----
+
+func TestTool_JobStatus_Running(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	reg := jobs.NewRegistry(10, time.Minute)
+	t.Cleanup(reg.Close)
+
+	jobID, err := reg.TryRegister("myhost", "sleep 60", 0)
+	if err != nil {
+		t.Fatalf("TryRegister: %v", err)
+	}
+
+	sess := newTestClientWithReg(t, mgr, reg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_job_status",
+		Arguments: map[string]any{"job_id": jobID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+
+	var out struct {
+		Running bool `json:"running"`
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !out.Running {
+		t.Error("expected running=true for registered job")
+	}
+}
+
+func TestTool_JobStatus_NotFound(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	reg := jobs.NewRegistry(10, time.Minute)
+	t.Cleanup(reg.Close)
+
+	sess := newTestClientWithReg(t, mgr, reg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_job_status",
+		Arguments: map[string]any{"job_id": "j_doesnotexist"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for unknown job")
+	}
+}
+
+// ---- ssh_job_cancel tests ----
+
+func TestTool_JobCancel_Running(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	reg := jobs.NewRegistry(10, time.Minute)
+	t.Cleanup(reg.Close)
+
+	jobID, err := reg.TryRegister("myhost", "sleep 60", 0)
+	if err != nil {
+		t.Fatalf("TryRegister: %v", err)
+	}
+	cancelCalled := false
+	reg.SetCancel(jobID, func() { cancelCalled = true })
+
+	sess := newTestClientWithReg(t, mgr, reg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_job_cancel",
+		Arguments: map[string]any{"job_id": jobID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+
+	var out struct {
+		Canceled   bool `json:"canceled"`
+		WasRunning bool `json:"was_running"`
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !out.Canceled {
+		t.Error("expected canceled=true")
+	}
+	if !out.WasRunning {
+		t.Error("expected was_running=true")
+	}
+	if !cancelCalled {
+		t.Error("expected cancel function to have been called")
+	}
+}
+
+func TestTool_JobCancel_NotFound(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	reg := jobs.NewRegistry(10, time.Minute)
+	t.Cleanup(reg.Close)
+
+	sess := newTestClientWithReg(t, mgr, reg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_job_cancel",
+		Arguments: map[string]any{"job_id": "j_doesnotexist"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for unknown job")
+	}
+}
+
+func TestTool_JobCancel_AlreadyFinished(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	reg := jobs.NewRegistry(10, time.Minute)
+	t.Cleanup(reg.Close)
+
+	jobID, err := reg.TryRegister("myhost", "echo hi", 0)
+	if err != nil {
+		t.Fatalf("TryRegister: %v", err)
+	}
+	code := 0
+	reg.MarkDone(jobID, &code)
+
+	sess := newTestClientWithReg(t, mgr, reg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_job_cancel",
+		Arguments: map[string]any{"job_id": jobID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error for finished job: %+v", res.Content)
+	}
+
+	var out struct {
+		Canceled   bool `json:"canceled"`
+		WasRunning bool `json:"was_running"`
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out.Canceled {
+		t.Error("expected canceled=false for already-finished job")
+	}
+	if out.WasRunning {
+		t.Error("expected was_running=false for already-finished job")
+	}
+}
+
+func TestTool_RunOnce_DetachError(t *testing.T) {
+	mgr := &fakeManager{
+		detachFn: func(_ context.Context, host string, in session.RunOnceInput, _ session.DetachRegistry) (string, error) {
+			return "", fmt.Errorf("registry full")
+		},
+	}
+	reg := jobs.NewRegistry(0, time.Minute) // maxJobs=0 means unlimited, but detach always errors via fakeMgr
+	t.Cleanup(reg.Close)
+
+	sess := newTestClientWithReg(t, mgr, reg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_run_once",
+		Arguments: map[string]any{"host": "myhost", "command": "sleep 60", "detach": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true when detach fails")
+	}
+}
+
+func TestTool_RunOnce_Error(t *testing.T) {
+	mgr := &fakeManager{
+		runOnceFn: func(_ context.Context, host string, in session.RunOnceInput) (session.RunOnceOutput, error) {
+			return session.RunOnceOutput{}, fmt.Errorf("connection refused")
+		},
+	}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_run_once",
+		Arguments: map[string]any{"host": "myhost", "command": "ls /"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true when RunOnce fails")
+	}
+}
+
+// ---- get_skill tool tests ----
+
+func TestGetSkill_List(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_skill",
+		Arguments: map[string]any{"action": "list"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+
+	text := res.Content[0].(*mcp.TextContent).Text
+	var entries []struct {
+		Slug        string `json:"slug"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		URI         string `json:"uri"`
+	}
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatalf("parse list response: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Errorf("expected 4 entries, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.Slug == "" {
+			t.Error("entry missing slug")
+		}
+		if e.Name == "" {
+			t.Error("entry missing name")
+		}
+		if e.Description == "" {
+			t.Error("entry missing description")
+		}
+		if !strings.HasPrefix(e.URI, "skill://rootcanal/") {
+			t.Errorf("URI %q does not start with skill://rootcanal/", e.URI)
+		}
+	}
+}
+
+func TestGetSkill_Read(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_skill",
+		Arguments: map[string]any{"action": "read", "skill": "session-workflow"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+
+	text := res.Content[0].(*mcp.TextContent).Text
+	if len(text) < 100 && !strings.Contains(text, "#") {
+		t.Errorf("expected non-empty markdown content, got %q", text)
+	}
+}
+
+func TestGetSkill_UnknownSlug(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_skill",
+		Arguments: map[string]any{"action": "read", "skill": "no-such-skill"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for unknown slug")
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "valid:") {
+		t.Errorf("expected error mentioning 'valid:', got %q", text)
+	}
+}
+
+func TestGetSkill_MissingSkill(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_skill",
+		Arguments: map[string]any{"action": "read"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true when skill param is missing for action=read")
+	}
+}
+
+func TestGetSkill_UnknownAction(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_skill",
+		Arguments: map[string]any{"action": "launch-missiles"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true for unknown action")
+	}
+}
+
+// ---- skill:// resource tests ----
+
+func TestSkillResources_Listed(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	result, err := sess.ListResources(context.Background(), &mcp.ListResourcesParams{})
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if len(result.Resources) != 4 {
+		t.Errorf("expected 4 skill resources, got %d", len(result.Resources))
+	}
+	for _, r := range result.Resources {
+		if !strings.HasPrefix(r.URI, "skill://rootcanal/") {
+			t.Errorf("resource URI %q does not start with skill://rootcanal/", r.URI)
+		}
+		if r.MIMEType != "text/markdown" {
+			t.Errorf("resource %q MIMEType = %q, want text/markdown", r.URI, r.MIMEType)
+		}
+	}
+}
+
+func TestSkillResources_ReadEach(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	slugs := []string{"session-workflow", "output-cleanliness", "runonce-vs-session", "sftp-and-safety"}
+	for _, slug := range slugs {
+		t.Run(slug, func(t *testing.T) {
+			uri := "skill://rootcanal/" + slug
+			result, err := sess.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: uri})
+			if err != nil {
+				t.Fatalf("ReadResource(%q): %v", uri, err)
+			}
+			if len(result.Contents) == 0 {
+				t.Fatalf("ReadResource(%q): empty contents", uri)
+			}
+			if result.Contents[0].Text == "" {
+				t.Errorf("ReadResource(%q): got empty text", uri)
+			}
+		})
+	}
+}
+
+func TestSkillResources_UnknownURI(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	sess := newTestClient(t, mgr, nil, nil)
+
+	_, err := sess.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "skill://rootcanal/nonexistent"})
+	if err == nil {
+		t.Error("expected error for unknown skill:// URI, got nil")
+	}
 }

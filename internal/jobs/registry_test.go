@@ -137,3 +137,69 @@ func TestRegistry_ElapsedSeconds(t *testing.T) {
 		t.Error("elapsed should be >= 0")
 	}
 }
+
+func TestRegistry_FinishedAt(t *testing.T) {
+	reg := jobs.NewRegistry(10, time.Minute)
+	defer reg.Close()
+
+	id, _ := reg.TryRegister("h", "cmd", 1)
+	job, _ := reg.Get(id)
+	if job.FinishedAt() != nil {
+		t.Error("FinishedAt should be nil while running")
+	}
+
+	code := 0
+	reg.MarkDone(id, &code)
+	if job.FinishedAt() == nil {
+		t.Error("FinishedAt should be non-nil after MarkDone")
+	}
+}
+
+func TestRegistry_ElapsedSeconds_Finished(t *testing.T) {
+	reg := jobs.NewRegistry(10, time.Minute)
+	defer reg.Close()
+
+	id, _ := reg.TryRegister("h", "cmd", 1)
+	time.Sleep(10 * time.Millisecond)
+	code := 0
+	reg.MarkDone(id, &code)
+
+	job, _ := reg.Get(id)
+	elapsed := job.ElapsedSeconds()
+	if elapsed < 0 {
+		t.Errorf("ElapsedSeconds should be >= 0 for finished job, got %d", elapsed)
+	}
+}
+
+func TestRegistry_AppendOutputOverCap(t *testing.T) {
+	reg := jobs.NewRegistry(10, time.Minute)
+	defer reg.Close()
+
+	id, _ := reg.TryRegister("h", "cmd", 1)
+	// Write more than tailCap (64KiB) to trigger appendCapped trimming.
+	big := make([]byte, 65*1024)
+	for i := range big {
+		big[i] = 'x'
+	}
+	reg.AppendStdout(id, big)
+	reg.AppendStdout(id, []byte("tail"))
+
+	job, _ := reg.Get(id)
+	tail := job.StdoutTail(10)
+	if tail != "xxxxxxxxxxtail"[:len(tail)] && !contains(tail, "tail") {
+		t.Errorf("StdoutTail should end with 'tail', got %q", tail)
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr2(s, sub))
+}
+
+func containsStr2(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
