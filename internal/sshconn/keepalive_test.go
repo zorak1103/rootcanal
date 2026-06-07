@@ -36,7 +36,7 @@ func (f *fakeKeepaliveClient) requestCount() int {
 
 func TestStartKeepalive_ZeroInterval_NoRequests(t *testing.T) {
 	fake := &fakeKeepaliveClient{}
-	stop := startKeepalive(fake, 0, 3, nil)
+	stop := startKeepalive(fake, 0, 3, nil, nil)
 	time.Sleep(50 * time.Millisecond)
 	stop()
 	if fake.requestCount() != 0 {
@@ -46,7 +46,7 @@ func TestStartKeepalive_ZeroInterval_NoRequests(t *testing.T) {
 
 func TestStartKeepalive_SendsRequests(t *testing.T) {
 	fake := &fakeKeepaliveClient{}
-	stop := startKeepalive(fake, 20*time.Millisecond, 3, nil)
+	stop := startKeepalive(fake, 20*time.Millisecond, 3, nil, nil)
 	time.Sleep(80 * time.Millisecond)
 	stop()
 	n := fake.requestCount()
@@ -57,7 +57,7 @@ func TestStartKeepalive_SendsRequests(t *testing.T) {
 
 func TestStartKeepalive_MaxFailures_ClosesClient(t *testing.T) {
 	fake := &fakeKeepaliveClient{sendErr: errors.New("connection reset")}
-	stop := startKeepalive(fake, 10*time.Millisecond, 3, nil)
+	stop := startKeepalive(fake, 10*time.Millisecond, 3, nil, nil)
 	defer stop()
 	// After 3 failures the client should be closed within ~50ms.
 	time.Sleep(100 * time.Millisecond)
@@ -70,4 +70,30 @@ func TestStartKeepalive_ConsecutiveReset(t *testing.T) {
 	// Verify that a successful request resets the consecutive failure counter.
 	// This is a best-effort test; main invariant tested via MaxFailures test above.
 	t.Skip("consecutive-reset invariant covered by MaxFailures test; full coverage needs a more complex fake")
+}
+
+func TestStartKeepalive_OnDead_CalledOnMaxFailures(t *testing.T) {
+	fake := &fakeKeepaliveClient{sendErr: errors.New("connection reset")}
+	var called atomic.Bool
+	onDead := func() { called.Store(true) }
+	stop := startKeepalive(fake, 10*time.Millisecond, 3, nil, onDead)
+	defer stop()
+	time.Sleep(100 * time.Millisecond)
+	if !fake.closed.Load() {
+		t.Error("client should be closed after maxFailures")
+	}
+	if !called.Load() {
+		t.Error("onDead should be called after maxFailures")
+	}
+}
+
+func TestStartKeepalive_OnDead_NilIsSafe(t *testing.T) {
+	// nil onDead with max_failures must close the client without panicking.
+	fake := &fakeKeepaliveClient{sendErr: errors.New("connection reset")}
+	stop := startKeepalive(fake, 10*time.Millisecond, 3, nil, nil)
+	defer stop()
+	time.Sleep(100 * time.Millisecond)
+	if !fake.closed.Load() {
+		t.Error("client should be closed after maxFailures even with nil onDead")
+	}
 }

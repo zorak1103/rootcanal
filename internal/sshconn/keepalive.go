@@ -17,12 +17,13 @@ type keepaliveClient interface {
 // StartKeepalive starts a background goroutine that sends periodic SSH keepalive requests.
 // If interval is 0, no goroutine is started and a no-op stop func is returned.
 // If maxFailures is 0, the connection is never closed on keepalive errors (keepalives are still sent).
+// If onDead is non-nil, it is called once immediately after client.Close() when max failures are reached.
 // The returned stop func is safe to call multiple times.
-func StartKeepalive(client *ssh.Client, interval time.Duration, maxFailures int, log *slog.Logger) func() {
-	return startKeepalive(client, interval, maxFailures, log)
+func StartKeepalive(client *ssh.Client, interval time.Duration, maxFailures int, log *slog.Logger, onDead func()) func() {
+	return startKeepalive(client, interval, maxFailures, log, onDead)
 }
 
-func startKeepalive(client keepaliveClient, interval time.Duration, maxFailures int, log *slog.Logger) func() {
+func startKeepalive(client keepaliveClient, interval time.Duration, maxFailures int, log *slog.Logger, onDead func()) func() {
 	if interval == 0 {
 		return func() {}
 	}
@@ -48,6 +49,9 @@ func startKeepalive(client keepaliveClient, interval time.Duration, maxFailures 
 								"failures", consecutive)
 						}
 						_ = client.Close()
+						if onDead != nil {
+							onDead()
+						}
 						return
 					}
 				} else {
