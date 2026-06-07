@@ -122,6 +122,7 @@ type sessionSummary struct {
 	LastUsedAt   string `json:"last_used_at"`
 	LastExitCode *int   `json:"last_exit_code,omitempty"`
 	StillRunning bool   `json:"still_running,omitempty"`
+	ClosedReason string `json:"closed_reason,omitempty"`
 }
 
 func handleSessionList(mgr session.Manager) func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, sessionListOut, error) {
@@ -137,6 +138,7 @@ func handleSessionList(mgr session.Manager) func(context.Context, *mcp.CallToolR
 				LastUsedAt:   info.LastUsedAt.UTC().Format(time.RFC3339),
 				LastExitCode: info.LastExitCode,
 				StillRunning: info.StillRunning,
+				ClosedReason: info.ClosedReason,
 			}
 		}
 		out := sessionListOut{Sessions: summaries}

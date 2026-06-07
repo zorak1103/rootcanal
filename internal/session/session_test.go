@@ -1122,3 +1122,93 @@ func TestManager_Open_NameCollision(t *testing.T) {
 		t.Fatal("expected error for duplicate session name")
 	}
 }
+
+// fakeSessionWithWaitErr wraps fakeSession and returns a specific error from
+// Wait() so we can drive the session into closedReason="lost" in tests.
+type fakeSessionWithWaitErr struct {
+	*fakeSession
+	waitErr error
+}
+
+func (f *fakeSessionWithWaitErr) Wait() error {
+	<-f.fakeSession.closeCh
+	return f.waitErr
+}
+
+func TestManager_Send_LostAdvisory(t *testing.T) {
+	// When a session closes with reason "lost", SendResult.Warnings must
+	// contain the reconnect advisory.
+	fs := newFakeSession()
+	bad := &fakeSessionWithWaitErr{fakeSession: fs, waitErr: errors.New("connection reset")}
+
+	m := newManager(minCfg(), fakeSessionsIface(bad), nil)
+
+	id, err := m.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Close the underlying fake session → Wait() returns an error → closedReason="lost".
+	_ = fs.Close()
+
+	// Wait for the manager's Wait goroutine to set closedReason and close s.done.
+	m.mu.RLock()
+	s := m.sessions[id]
+	m.mu.RUnlock()
+	select {
+	case <-s.done:
+	case <-time.After(time.Second):
+		t.Fatal("session did not close within 1s")
+	}
+
+	res, err := m.Send(context.Background(), id, SendInput{Input: "echo hi"})
+	if err != nil {
+		t.Fatalf("Send on closed session: %v", err)
+	}
+	if res.ClosedReason != "lost" {
+		t.Errorf("ClosedReason = %q, want %q", res.ClosedReason, "lost")
+	}
+
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "connection lost") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'connection lost' advisory in Warnings, got %v", res.Warnings)
+	}
+}
+
+func TestManager_List_ClosedReason(t *testing.T) {
+	// SessionInfo returned by List() must expose ClosedReason.
+	fs := newFakeSession()
+	bad := &fakeSessionWithWaitErr{fakeSession: fs, waitErr: errors.New("connection reset")}
+
+	m := newManager(minCfg(), fakeSessionsIface(bad), nil)
+
+	id, err := m.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	_ = fs.Close()
+
+	m.mu.RLock()
+	s := m.sessions[id]
+	m.mu.RUnlock()
+	select {
+	case <-s.done:
+	case <-time.After(time.Second):
+		t.Fatal("session did not close within 1s")
+	}
+
+	infos := m.List()
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 session in List, got %d", len(infos))
+	}
+	if infos[0].ClosedReason != "lost" {
+		t.Errorf("SessionInfo.ClosedReason = %q, want %q", infos[0].ClosedReason, "lost")
+	}
+}

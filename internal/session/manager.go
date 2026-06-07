@@ -23,6 +23,18 @@ const (
 	quiesce   = 50 * time.Millisecond
 )
 
+const lostAdvisory = "connection lost — the remote shell and its state are gone; " +
+	"reopen the session to continue (a fresh connection will be established automatically)"
+
+// appendLostWarning appends the reconnect advisory to res.Warnings when
+// ClosedReason is "lost". All other reasons pass through unchanged.
+func appendLostWarning(res SendResult) SendResult {
+	if res.ClosedReason == "lost" {
+		res.Warnings = append(res.Warnings, lostAdvisory)
+	}
+	return res
+}
+
 // SessionInfo is a snapshot of a session's metadata returned by List.
 type SessionInfo struct {
 	ID           string
@@ -32,6 +44,8 @@ type SessionInfo struct {
 	LastUsedAt   time.Time
 	LastExitCode *int
 	StillRunning bool
+	// ClosedReason is "" while the session is open; values mirror SendResult.ClosedReason.
+	ClosedReason string
 }
 
 // DetachRegistry is the minimal jobs.Registry surface needed by Detach.
@@ -331,7 +345,7 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 	if s.closed {
 		cr := s.closedReason
 		s.mu.Unlock()
-		return SendResult{ClosedReason: cr, Warnings: warnings}, nil
+		return appendLostWarning(SendResult{ClosedReason: cr, Warnings: warnings}), nil
 	}
 
 	// Peek mode: wait for idle, no marker injection.
@@ -344,12 +358,12 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		s.mu.Lock()
 		cr := s.closedReason
 		s.mu.Unlock()
-		return SendResult{
+		return appendLostWarning(SendResult{
 			Output:       string(cleanOutput(out)),
 			Truncated:    trunc,
 			ClosedReason: cr,
 			Warnings:     warnings,
-		}, nil
+		}), nil
 	}
 
 	// Continuation mode: empty input waits for in-flight marker.
@@ -360,7 +374,8 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		}
 		nonce := s.inflight.nonce
 		s.mu.Unlock()
-		return m.waitForMarker(ctx, s, nonce, timeout, in.Raw, warnings)
+		res, err := m.waitForMarker(ctx, s, nonce, timeout, in.Raw, warnings)
+		return appendLostWarning(res), err
 	}
 
 	// New command: reject if another is in flight.
@@ -388,7 +403,7 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		s.mu.Lock()
 		cr := s.closedReason
 		s.mu.Unlock()
-		return SendResult{Output: string(out), Truncated: trunc, ClosedReason: cr, Warnings: warnings}, nil
+		return appendLostWarning(SendResult{Output: string(out), Truncated: trunc, ClosedReason: cr, Warnings: warnings}), nil
 	}
 
 	// Normal mode: inject exit marker.
@@ -425,7 +440,8 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		return SendResult{}, ctx.Err()
 	}
 
-	return m.waitForMarker(ctx, s, nonce, timeout, false, warnings)
+	res, err := m.waitForMarker(ctx, s, nonce, timeout, false, warnings)
+	return appendLostWarning(res), err
 }
 
 func (m *manager) waitForMarker(
@@ -580,6 +596,7 @@ func (m *manager) List() []SessionInfo {
 			LastUsedAt:   s.lastUsedAt,
 			LastExitCode: s.lastExitCode,
 			StillRunning: s.inflight != nil,
+			ClosedReason: s.closedReason,
 		}
 		s.mu.Unlock()
 		infos = append(infos, info)
