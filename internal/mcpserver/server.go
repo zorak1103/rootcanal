@@ -11,7 +11,13 @@ import (
 	"gitlab.com/zorak1103/rootcanal/internal/version"
 )
 
-// New builds a configured *mcp.Server with all session and SFTP tools registered.
+// New builds a configured *mcp.Server with all session, SFTP, and skill tools
+// registered, plus skill:// resources for each embedded guidance document.
+//
+// Total tools: 13 always-registered (session ×4, SFTP ×3, ssh_run_once, get_skill)
+// plus 2 optional discovery tools (ssh_list_hosts, ssh_host_capabilities) when cfg
+// is non-nil, and 2 optional job tools (ssh_job_status, ssh_job_cancel) when reg
+// is non-nil. skill:// resources are always registered.
 //
 // cfg, if non-nil, enables the discovery tools (ssh_list_hosts, ssh_host_capabilities).
 //
@@ -103,6 +109,13 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Reg
 			Description: "Return what rootcanal can do on a specific host: SSH, SFTP, allowed SFTP path prefixes, session idle timeout, and terminal/output settings.",
 		}, handleHostCapabilities(cfg))
 	}
+
+	// Skill resources and tool (always registered)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_skill",
+		Description: "Access embedded skill guidance docs. Use action=list to see available skills, action=read with skill=<slug> to fetch a specific doc. Prefer reading skill:// resources directly if your client supports them.",
+	}, handleGetSkill())
+	registerSkillResources(srv)
 
 	return srv
 }

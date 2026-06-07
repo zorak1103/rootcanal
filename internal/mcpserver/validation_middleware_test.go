@@ -135,3 +135,43 @@ func TestFieldSuggestionMiddleware_ValidArgs_CallsNext(t *testing.T) {
 		t.Error("next should be called for valid args")
 	}
 }
+
+func TestFieldSuggestionMiddleware_EmptyArguments_PassThrough(t *testing.T) {
+	req := &mcp.CallToolRequest{}
+	req.Params = &mcp.CallToolParamsRaw{
+		Name:      "ssh_session_list",
+		Arguments: json.RawMessage(`{}`),
+	}
+
+	nextCalled := false
+	mw := fieldSuggestionMiddleware()
+	handler := mw(func(_ context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		nextCalled = true
+		return nil, nil
+	})
+
+	_, err := handler(context.Background(), "tools/call", req)
+	if err != nil {
+		t.Fatalf("unexpected error for empty args: %v", err)
+	}
+	if !nextCalled {
+		t.Error("next should be called for empty args")
+	}
+}
+
+func TestFieldSuggestionMiddleware_NonToolsCall_PassThrough(t *testing.T) {
+	nextCalled := false
+	mw := fieldSuggestionMiddleware()
+	handler := mw(func(_ context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		nextCalled = true
+		return nil, nil
+	})
+
+	_, err := handler(context.Background(), "resources/read", &mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error for non-tools/call: %v", err)
+	}
+	if !nextCalled {
+		t.Error("next should be called for non-tools/call methods")
+	}
+}

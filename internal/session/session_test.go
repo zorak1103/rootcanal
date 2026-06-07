@@ -1212,3 +1212,48 @@ func TestManager_List_ClosedReason(t *testing.T) {
 		t.Errorf("SessionInfo.ClosedReason = %q, want %q", infos[0].ClosedReason, "lost")
 	}
 }
+
+// ---- Detach unit tests (no real pool) ----
+
+func TestManager_Detach_NilPool(t *testing.T) {
+	mgr := newManager(minCfg(), fakeSessions(), nil)
+	defer mgr.Shutdown(context.Background())
+
+	_, err := mgr.Detach(context.Background(), "h", RunOnceInput{Command: "sleep 60"}, nil)
+	if err == nil {
+		t.Fatal("expected error when pool is nil")
+	}
+	if !strings.Contains(err.Error(), "no pool configured") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestManager_Detach_UnknownHost(t *testing.T) {
+	// Use NewManager with a real pool pointing at an unreachable address;
+	// the host-not-found check happens before the pool.Get call.
+	cfg := &config.Config{
+		Limits: config.Limits{
+			MaxSessionsTotal: 32, MaxSessionsPerHost: 4,
+			DefaultIdleTimeout: 15 * time.Minute, MaxSessionAge: 4 * time.Hour,
+			OutputBufferBytes: 4096, DefaultSendTimeoutMs: 2000, MaxSendTimeoutMs: 30000,
+			DialTimeout: 100 * time.Millisecond,
+		},
+		Hosts: map[string]config.Host{
+			"h": {Address: "127.0.0.1:1", User: "u", KnownHosts: "system",
+				Auth: config.Auth{Type: "password", PasswordEnv: "TEST_DETACH_PASS"}},
+		},
+	}
+	t.Setenv("TEST_DETACH_PASS", "x")
+	pool := hostpool.New(cfg, sshconn.ProdDialer{})
+	defer pool.Close()
+	mgr := NewManager(cfg, pool, nil)
+	defer mgr.Shutdown(context.Background())
+
+	_, err := mgr.Detach(context.Background(), "nope", RunOnceInput{Command: "ls"}, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown host")
+	}
+	if !strings.Contains(err.Error(), "unknown host") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
