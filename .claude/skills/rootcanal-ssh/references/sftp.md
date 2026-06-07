@@ -39,6 +39,28 @@ To allow any path: `sftp_allowed_prefixes: ["/"]` — this must be written delib
 > Use `sftp_read` only for small config/text files. For large file transfers, use `ssh_run_once`
 > to invoke `scp`, `rsync`, or similar tools on the remote host.
 
+## Reading files that contain secrets
+
+`sftp_read` returns file content **inline in the conversation context** — any secrets in the
+file are sent to Anthropic's infrastructure and may appear in conversation logs, the same as
+typing a password directly in chat.
+
+Do not use `sftp_read` on `.env` files, credential stores, or SSH private keys. Instead,
+consume the value at the shell layer so it never surfaces in a tool result:
+
+```
+# BAD — exposes every secret inline in the conversation:
+sftp_read(host="prod", path="/srv/app/.env")
+
+# GOOD — value stays inside the remote process, never printed:
+ssh_run_once(host="prod", command='mysql -p"$(grep DB_PASS /srv/app/.env | cut -d= -f2)" -e "SELECT 1;"')
+ssh_run_once(host="prod", command='export TOKEN="$(cat /run/secrets/api_token)"; ./deploy.sh')
+```
+
+Shell substitution (`$(...)`) reads the secret, passes it to the target program as a flag or
+environment variable, and never echoes it. This pattern applies to any tool that accepts
+credentials via flag or environment variable.
+
 ## ⚠️ sftp_read: Silent Truncation
 
 `sftp_read` silently truncates at `sftp_max_read_bytes` (default 2 MiB) using `io.LimitReader`.

@@ -57,6 +57,25 @@ Values above 60 000 ms are clamped and reported via `warnings`.
 
 ---
 
+## Choosing between `ssh_run_once` and `detach=true`
+
+Pick before you run — a mid-run SIGTERM on a write operation can leave state half-applied.
+
+| Operation | Default | Rationale |
+|---|---|---|
+| One-shot reads (`df`, `ls`, `cat`, `docker ps`) | `ssh_run_once` | Bounded, fast |
+| Script/build with predictable, <45 s duration | `ssh_run_once` | Headroom below the 60 s cap |
+| DB export/import (`pg_dump`, `mysqldump`, `expdp`) | **`detach=true`** | Volume-dependent; exceeds 60 s |
+| Large file copy / `rsync` | **`detach=true`** | Network + size dependent |
+| DDL migrations, index rebuilds | **`detach=true`** | Minutes on large tables |
+| Package installs (`apt`, `yum`) | **`detach=true`** | Repo latency is unpredictable |
+
+**When in doubt, detach.** The cost of an unnecessary detach is one extra `ssh_job_status`
+call; the cost of a mid-run SIGTERM on a write is a corrupted or half-finished operation.
+See the SIGTERM behaviour in the **Background Jobs** section and `references/error-handling.md`.
+
+---
+
 ## Session Workflow
 
 Use persistent sessions when you need interactive state (environment variables, working directory,
@@ -114,6 +133,15 @@ For TUI peeking (vim, top), use `wait_idle_ms` instead of empty input.
 
 - **Pass a sudo password in conversation or prompt context.** It travels to Anthropic's
   infrastructure in plaintext and may appear in conversation logs. See [references/sudo.md](references/sudo.md).
+
+- **Read secret files via `sftp_read`.** `sftp_read` returns file contents inline in the
+  conversation context — reading `.env` files, credential stores, or SSH private keys exposes
+  every secret to Anthropic's infrastructure. Consume secrets at the shell layer instead so
+  they never appear in a tool result:
+  ```
+  ssh_run_once(host="prod", command='mysql -p"$(grep DB_PASS /app/.env | cut -d= -f2)" -e "SELECT 1;"')
+  ```
+  See [references/sftp.md](references/sftp.md).
 
 - **Invent host names.** Only use names present in the config or returned by `ssh_list_hosts`.
   An unknown name returns `"unknown host \"<name>\""` — do not retry with guesses; ask the user.

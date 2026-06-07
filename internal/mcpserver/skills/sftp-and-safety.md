@@ -23,6 +23,11 @@ about inline. For large files, prefer `ssh_run_once` with filtering (e.g., `grep
 
 **Read limit: 2 MiB.** The server rejects reads before any I/O if the file exceeds this.
 
+> ⚠️ **Secret exposure:** `sftp_read` returns file content inline in the conversation context.
+> Never read `.env` files, credential stores, or SSH private keys via `sftp_read` — secrets
+> will be sent to the LLM provider's infrastructure. Consume them at the shell layer instead:
+> `ssh_run_once(host, command='cmd -p"$(grep KEY /app/.env | cut -d= -f2)"')`
+
 ### sftp_write
 
 Write content to a remote file.
@@ -78,6 +83,11 @@ These are absolute prohibitions. Never do any of the following:
 **Never pass a sudo password in conversation or prompt context.** Passwords in chat messages
 travel to Anthropic's infrastructure in plaintext and may appear in conversation logs. There is
 no safe way to pass credentials through the LLM context layer.
+
+**Never read secret files via `sftp_read`.** `sftp_read` returns file content inline in the
+conversation context. Reading `.env` files, credential stores, or SSH private keys exposes every
+secret to the LLM provider's infrastructure. Consume secrets at the shell layer inside
+`ssh_run_once` using command substitution so the value never appears in a tool result.
 
 **Never invent host names.** Only use names present in the operator config or returned by
 `ssh_list_hosts`. An unknown name returns `"unknown host \"<name>\""` — do not retry with

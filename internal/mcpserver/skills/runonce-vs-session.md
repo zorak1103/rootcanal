@@ -31,6 +31,23 @@ See `skill://rootcanal/session-workflow` for the full open/send/close lifecycle.
 
 ---
 
+## Choosing between `ssh_run_once` and `detach=true`
+
+Pick before you run — a mid-run SIGTERM on a write operation can leave state half-applied.
+**When in doubt, detach:** the cost of an unnecessary detach is one extra `ssh_job_status`
+call; the cost of a SIGTERM mid-write is a corrupted or half-applied operation.
+
+| Operation | Default | Rationale |
+|---|---|---|
+| One-shot reads (`df`, `ls`, `cat`, `docker ps`) | `ssh_run_once` | Bounded, fast |
+| Script/build with predictable, <45 s duration | `ssh_run_once` | Headroom below the 60 s cap |
+| DB export/import (`pg_dump`, `mysqldump`, `expdp`) | **`detach=true`** | Volume-dependent; exceeds 60 s |
+| Large file copy / `rsync` | **`detach=true`** | Network + size dependent |
+| DDL migrations, index rebuilds | **`detach=true`** | Minutes on large tables |
+| Package installs (`apt`, `yum`) | **`detach=true`** | Repo latency is unpredictable |
+
+---
+
 ## Detach Mode (Background Jobs)
 
 For jobs that run longer than 60 s, use `detach=true` on `ssh_run_once`. rootcanal starts the
