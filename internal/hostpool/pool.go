@@ -62,7 +62,7 @@ func (p *Pool) effectiveKeepalive(hostName string) (time.Duration, int) {
 func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), error) {
 	h, ok := p.cfg.Hosts[hostName]
 	if !ok {
-		return nil, nil, fmt.Errorf("unknown host %q", hostName)
+		return nil, nil, config.UnknownHostError(hostName)
 	}
 
 	p.mu.Lock()

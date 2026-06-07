@@ -126,7 +126,7 @@ type manager struct {
 
 func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	if _, ok := m.cfg.Hosts[host]; !ok {
-		return "", fmt.Errorf("unknown host %q", host)
+		return "", config.UnknownHostError(host)
 	}
 
 	if name != "" {

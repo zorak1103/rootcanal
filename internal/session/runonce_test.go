@@ -1,9 +1,121 @@
 package session
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
+
+// ---- classifyRunResult tests (Bug #15) ----
+
+func TestClassifyRunResult_Success(t *testing.T) {
+	c := classifyRunResult(0, "", true, false, 60000)
+	if c.HardError {
+		t.Fatal("expected no hard error on success")
+	}
+	if c.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", c.ExitCode)
+	}
+	if c.Signal != "" {
+		t.Errorf("Signal = %q, want empty", c.Signal)
+	}
+	if len(c.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none", c.Warnings)
+	}
+}
+
+func TestClassifyRunResult_CleanNonZeroExit(t *testing.T) {
+	// Process exited with code 2, no signal — real exit code must be preserved.
+	c := classifyRunResult(2, "", true, false, 60000)
+	if c.HardError {
+		t.Fatal("unexpected hard error")
+	}
+	if c.ExitCode != 2 {
+		t.Errorf("ExitCode = %d, want 2", c.ExitCode)
+	}
+	if c.Signal != "" {
+		t.Errorf("Signal = %q, want empty", c.Signal)
+	}
+	if len(c.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none", c.Warnings)
+	}
+}
+
+func TestClassifyRunResult_KilledByDeadline(t *testing.T) {
+	// The harness sent SIGTERM because the deadline fired (killedByDeadline=true).
+	// Warning must mention the timeout cap, NOT NAT/keepalive.
+	c := classifyRunResult(-1, "TERM", true, true, 60000)
+	if c.HardError {
+		t.Fatal("unexpected hard error")
+	}
+	if c.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", c.ExitCode)
+	}
+	if c.Signal != "TERM" {
+		t.Errorf("Signal = %q, want TERM", c.Signal)
+	}
+	if len(c.Warnings) == 0 {
+		t.Fatal("expected a warning")
+	}
+	if strings.Contains(c.Warnings[0], "NAT") || strings.Contains(c.Warnings[0], "keepalive") {
+		t.Errorf("deadline warning must not mention NAT/keepalive, got: %s", c.Warnings[0])
+	}
+	if !strings.Contains(c.Warnings[0], "60000") {
+		t.Errorf("deadline warning should include the timeout_ms value (60000), got: %s", c.Warnings[0])
+	}
+}
+
+func TestClassifyRunResult_ExternalSignal(t *testing.T) {
+	// TERM arrived but we did not kill it — keepalive/NAT warning applies.
+	c := classifyRunResult(-1, "TERM", true, false, 60000)
+	if c.HardError {
+		t.Fatal("unexpected hard error")
+	}
+	if c.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", c.ExitCode)
+	}
+	if c.Signal != "TERM" {
+		t.Errorf("Signal = %q, want TERM", c.Signal)
+	}
+	if len(c.Warnings) == 0 {
+		t.Fatal("expected a warning")
+	}
+	if !strings.Contains(c.Warnings[0], "NAT") {
+		t.Errorf("external-signal warning should mention NAT, got: %s", c.Warnings[0])
+	}
+}
+
+func TestClassifyRunResult_HardError(t *testing.T) {
+	// Non-ExitError (IO problem) — must set HardError so RunOnce wraps and returns it.
+	c := classifyRunResult(0, "", false, false, 60000)
+	if !c.HardError {
+		t.Fatal("expected HardError = true for non-ExitError")
+	}
+}
+
+// ---- extractExitCode tests (covers the nil and non-ExitError branches) ----
+
+func TestExtractExitCode_NilError(t *testing.T) {
+	code, sig, isExit := extractExitCode(nil)
+	if !isExit {
+		t.Error("expected isExitErr=true for nil error")
+	}
+	if code != 0 {
+		t.Errorf("exitCode = %d, want 0", code)
+	}
+	if sig != "" {
+		t.Errorf("signal = %q, want empty", sig)
+	}
+}
+
+func TestExtractExitCode_HardIOError(t *testing.T) {
+	// A non-ExitError (e.g., network IO failure) must return isExitErr=false
+	// so the caller wraps it as a hard error.
+	_, _, isExit := extractExitCode(fmt.Errorf("connection reset by peer"))
+	if isExit {
+		t.Error("expected isExitErr=false for non-ssh.ExitError")
+	}
+}
 
 func TestCappedBuffer_Write_BelowCap(t *testing.T) {
 	cb := &cappedBuffer{cap: 100}

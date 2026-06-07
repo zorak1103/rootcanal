@@ -108,7 +108,9 @@ process state.
 | `ssh_session_send` timeout default | 2 000 ms | Override per-call with `timeout_ms` |
 | `ssh_session_send` timeout max | 30 000 ms | Hard cap; clamped with `warnings` |
 | `ssh_run_once` timeout default | 60 000 ms | Same as max — pass `timeout_ms` only to shorten |
-| `ssh_run_once` timeout max | 60 000 ms | Hard cap; clamped with `warnings` |
+| `ssh_run_once` timeout max | 60 000 ms | Hard cap for synchronous calls; clamped with `warnings` |
+| `ssh_run_once detach=true` timeout default | 86 400 000 ms (24 h) | Separate ceiling (`detach_max_duration_ms`) — detached jobs are not bound by the 60 s cap |
+| `ssh_run_once detach=true` timeout max | 86 400 000 ms (24 h) | Configurable; pass `timeout_ms` to impose a shorter job-specific limit |
 | Output buffer | 1 MiB / session | Ring buffer; overflow → `truncated: true` |
 | `ssh_run_once` stdout/stderr cap | 1 MiB per stream | Each stream is independently capped at `run_once_max_bytes`; `truncated: true` if either hits the cap |
 | SFTP read limit | 2 MiB | Content returned inline in LLM context |

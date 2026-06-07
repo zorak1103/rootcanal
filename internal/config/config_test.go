@@ -710,3 +710,41 @@ hosts:
 		t.Errorf("SFTPAllowedPrefixes = %v, want [/srv/app /var/log]", h.SFTPAllowedPrefixes)
 	}
 }
+
+// ---- UnknownHostError tests (Bug #19) ----
+
+func TestUnknownHostError_ContainsHostName(t *testing.T) {
+	err := UnknownHostError("ci_host")
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if !strings.Contains(err.Error(), `unknown host "ci_host"`) {
+		t.Errorf("error should contain 'unknown host \"ci_host\"', got: %s", err.Error())
+	}
+}
+
+func TestUnknownHostError_MentionsRestart(t *testing.T) {
+	err := UnknownHostError("ci_host")
+	if !strings.Contains(err.Error(), "restart") {
+		t.Errorf("error should hint at restart, got: %s", err.Error())
+	}
+}
+
+func TestUnknownHostError_MentionsSshListHosts(t *testing.T) {
+	err := UnknownHostError("ci_host")
+	if !strings.Contains(err.Error(), "ssh_list_hosts") {
+		t.Errorf("error should mention ssh_list_hosts, got: %s", err.Error())
+	}
+}
+
+// ---- DetachMaxDurationMs default (Bug #18) ----
+
+func TestApplyDefaults_DetachMaxDurationMs(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+
+	const wantMs = 24 * 60 * 60 * 1000
+	if cfg.Limits.DetachMaxDurationMs != wantMs {
+		t.Errorf("DetachMaxDurationMs default = %d, want %d (24h)", cfg.Limits.DetachMaxDurationMs, wantMs)
+	}
+}

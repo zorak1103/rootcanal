@@ -35,6 +35,9 @@ const (
 	// job registry
 	defaultJobTTL  = time.Hour
 	defaultMaxJobs = 32
+
+	// detach: separate ceiling so detached jobs can outlive the 60s run_once cap
+	defaultDetachMaxDurationMs = 24 * 60 * 60 * 1000 // 24 h
 )
 
 // Config is the top-level configuration.
@@ -66,6 +69,11 @@ type Limits struct {
 	DefaultKeepaliveMaxFailures int           `yaml:"default_keepalive_max_failures,omitempty"`
 	JobTTL                      time.Duration `yaml:"job_ttl,omitempty"`
 	MaxJobs                     int           `yaml:"max_jobs,omitempty"`
+	// DetachMaxDurationMs is the maximum wall-clock duration for a detached job
+	// (ssh_run_once with detach=true). Unlike RunOnceMaxTimeoutMs, which governs
+	// the 60 s synchronous cap, this allows detached jobs to run for hours.
+	// Default: 86400000 (24 h). Set to 0 to use the default.
+	DetachMaxDurationMs int `yaml:"detach_max_duration_ms,omitempty"`
 }
 
 // Host is a pre-declared SSH target.
@@ -188,6 +196,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if l.MaxJobs == 0 {
 		l.MaxJobs = defaultMaxJobs
+	}
+	if l.DetachMaxDurationMs == 0 {
+		l.DetachMaxDurationMs = defaultDetachMaxDurationMs
 	}
 
 	for name, h := range cfg.Hosts {
