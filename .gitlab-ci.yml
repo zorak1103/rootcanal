@@ -24,12 +24,16 @@ default:
 
 lint:
   stage: verify
+  rules:
+    - if: '$CI_PIPELINE_SOURCE != "schedule"'
   script:
     - test -z "$(gofmt -s -l $(git ls-files '*.go'))" || (gofmt -s -l $(git ls-files '*.go') && exit 1)
 
 test:
   stage: test
   tags: [aorus]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE != "schedule"'
   # Coverage and static analysis are enforced locally by the pre-push hook
   # (go vet + staticcheck) and `task cover` (≥85% gate). CI verifies only that
   # tests pass — the heavy -coverpkg=./internal/... flag is omitted to stay
@@ -39,6 +43,8 @@ test:
 
 build:
   stage: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE != "schedule"'
   script:
     - go build ./cmd/rootcanal
   artifacts:
