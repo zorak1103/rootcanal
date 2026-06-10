@@ -1,4 +1,4 @@
-FROM alpine:3.23
+FROM alpine:3.24
 
 ARG USER=testuser
 ARG PASS=hunter2hunter2
