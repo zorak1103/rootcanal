@@ -49,11 +49,11 @@ type sftpClientIface interface {
 // realSFTPClient adapts *sftp.Client to sftpClientIface.
 type realSFTPClient struct{ *sftp.Client }
 
-func (r *realSFTPClient) Open(path string) (io.ReadCloser, error) { return r.Client.Open(path) }
-func (r *realSFTPClient) OpenFile(path string, f int) (io.WriteCloser, error) {
-	return r.Client.OpenFile(path, f)
+func (r *realSFTPClient) Open(p string) (io.ReadCloser, error) { return r.Client.Open(p) }
+func (r *realSFTPClient) OpenFile(p string, f int) (io.WriteCloser, error) {
+	return r.Client.OpenFile(p, f)
 }
-func (r *realSFTPClient) ReadDir(path string) ([]fs.FileInfo, error) { return r.Client.ReadDir(path) }
+func (r *realSFTPClient) ReadDir(p string) ([]fs.FileInfo, error) { return r.Client.ReadDir(p) }
 
 // poolGetter abstracts pool.Get so sftpops can be tested without a real Pool.
 type poolGetter func(ctx context.Context, host string) (*ssh.Client, func(), error)
@@ -132,8 +132,8 @@ func (o *ops) openSFTP(ctx context.Context, host string) (sftpClientIface, func(
 	return sftpClient, cleanup, nil
 }
 
-func (o *ops) Read(ctx context.Context, host, path string, maxBytes int) ([]byte, bool, error) {
-	cleanedPath, err := o.validateSFTPPath(host, path)
+func (o *ops) Read(ctx context.Context, host, p string, maxBytes int) (data []byte, isBinary bool, err error) {
+	cleanedPath, err := o.validateSFTPPath(host, p)
 	if err != nil {
 		return nil, false, err
 	}
@@ -155,12 +155,12 @@ func (o *ops) Read(ctx context.Context, host, path string, maxBytes int) ([]byte
 		limit = maxBytes
 	}
 
-	data, err := io.ReadAll(io.LimitReader(f, int64(limit)))
+	data, err = io.ReadAll(io.LimitReader(f, int64(limit)))
 	if err != nil {
-		return nil, false, fmt.Errorf("reading %q on %q: %w", path, host, err)
+		return nil, false, fmt.Errorf("reading %q on %q: %w", p, host, err)
 	}
 
-	isBinary := bytes.IndexByte(data, 0) != -1 || !utf8.Valid(data)
+	isBinary = bytes.IndexByte(data, 0) != -1 || !utf8.Valid(data)
 	return data, isBinary, nil
 }
 
@@ -187,8 +187,8 @@ func (o *ops) Write(ctx context.Context, host, fpath string, content []byte, mod
 		base := path.Base(cleanedPath)
 		writePath = dir + "/." + base + ".rootcanal.tmp"
 		// Validate the temp path passes prefix check too.
-		if _, err := o.validateSFTPPath(host, writePath); err != nil {
-			return fmt.Errorf("atomic write: temp path %q not in allowed prefixes: %w", writePath, err)
+		if _, tmpErr := o.validateSFTPPath(host, writePath); tmpErr != nil {
+			return fmt.Errorf("atomic write: temp path %q not in allowed prefixes: %w", writePath, tmpErr)
 		}
 	}
 
@@ -233,8 +233,8 @@ func (o *ops) Write(ctx context.Context, host, fpath string, content []byte, mod
 
 const sftpWriteFlags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 
-func (o *ops) List(ctx context.Context, host, path string) ([]Entry, error) {
-	cleanedPath, err := o.validateSFTPPath(host, path)
+func (o *ops) List(ctx context.Context, host, p string) ([]Entry, error) {
+	cleanedPath, err := o.validateSFTPPath(host, p)
 	if err != nil {
 		return nil, err
 	}

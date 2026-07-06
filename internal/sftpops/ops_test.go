@@ -27,9 +27,11 @@ import (
 
 // ---- fake pool getter ----
 
-func okPool(c *ssh.Client) poolGetter {
+// okPool returns a poolGetter that always succeeds with a nil client — the
+// fake sftpClientIface in these tests never needs a real *ssh.Client.
+func okPool() poolGetter {
 	return func(_ context.Context, _ string) (*ssh.Client, func(), error) {
-		return c, func() {}, nil
+		return nil, func() {}, nil
 	}
 }
 
@@ -42,14 +44,17 @@ func errPool(err error) poolGetter {
 // ---- fake sftpClientIface ----
 
 type fakeFS struct {
-	files     map[string][]byte
-	dirs      map[string][]fs.FileInfo
-	openErr   error
-	writeErr  error
-	chmodErr  error
-	listErr   error
-	renameErr error
-	removeErr error
+	files           map[string][]byte
+	dirs            map[string][]fs.FileInfo
+	openErr         error
+	readErr         error // returned by the ReadCloser from Open, instead of a normal read
+	writeErr        error
+	chmodErr        error
+	listErr         error
+	renameErr       error
+	removeErr       error
+	captureWriteErr error // returned by the WriteCloser from OpenFile on Write
+	captureCloseErr error // returned by the WriteCloser from OpenFile on Close
 }
 
 func newFakeFS() *fakeFS {
@@ -67,8 +72,19 @@ func (f *fakeFS) Open(path string) (io.ReadCloser, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
+	if f.readErr != nil {
+		//nolint:nilerr // Open itself succeeds; readErr is deliberately deferred to the
+		// returned reader's Read() call, to exercise the caller's io.ReadAll error path.
+		return io.NopCloser(&errReader{err: f.readErr}), nil
+	}
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
+
+// errReader is an io.Reader that always fails, used to exercise io.ReadAll
+// error handling without a real broken filesystem.
+type errReader struct{ err error }
+
+func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
 
 func (f *fakeFS) OpenFile(path string, _ int) (io.WriteCloser, error) {
 	if f.writeErr != nil {
@@ -120,8 +136,16 @@ type captureBuf struct {
 	fs   *fakeFS
 }
 
-func (b *captureBuf) Write(p []byte) (int, error) { return b.buf.Write(p) }
+func (b *captureBuf) Write(p []byte) (int, error) {
+	if b.fs.captureWriteErr != nil {
+		return 0, b.fs.captureWriteErr
+	}
+	return b.buf.Write(p)
+}
 func (b *captureBuf) Close() error {
+	if b.fs.captureCloseErr != nil {
+		return b.fs.captureCloseErr
+	}
 	b.fs.files[b.path] = b.buf.Bytes()
 	return nil
 }
@@ -186,7 +210,7 @@ func TestRead_Success(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.files["/etc/hosts"] = []byte("127.0.0.1 localhost\n")
 
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	data, binary, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -203,7 +227,7 @@ func TestRead_BinaryDetection(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.files["/bin/null"] = []byte{0x00, 0x01, 0x02} // contains null byte
 
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	_, binary, err := o.Read(context.Background(), "h", "/bin/null", 0)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -217,7 +241,7 @@ func TestRead_InvalidUTF8(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.files["/bad.txt"] = []byte{0xff, 0xfe, 'x'} // invalid UTF-8
 
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	_, binary, err := o.Read(context.Background(), "h", "/bad.txt", 0)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -231,7 +255,7 @@ func TestRead_MaxBytesRespected(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.files["/large.txt"] = bytes.Repeat([]byte("x"), 1000)
 
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	data, _, err := o.Read(context.Background(), "h", "/large.txt", 10)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -250,7 +274,7 @@ func TestRead_PoolError(t *testing.T) {
 }
 
 func TestRead_FileNotFound(t *testing.T) {
-	o := newTestOps(minCfg(), okPool(nil), newFakeFS())
+	o := newTestOps(minCfg(), okPool(), newFakeFS())
 	_, _, err := o.Read(context.Background(), "h", "/no/such/file", 0)
 	if err == nil {
 		t.Fatal("expected error for missing file")
@@ -260,10 +284,21 @@ func TestRead_FileNotFound(t *testing.T) {
 func TestRead_OpenError(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.openErr = errors.New("permission denied")
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	_, _, err := o.Read(context.Background(), "h", "/etc/shadow", 0)
 	if err == nil {
 		t.Fatal("expected open error")
+	}
+}
+
+func TestRead_ReadAllError(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.files["/etc/flaky"] = []byte("irrelevant") // must exist for Open to succeed
+	ffs.readErr = errors.New("connection reset mid-read")
+	o := newTestOps(minCfg(), okPool(), ffs)
+	_, _, err := o.Read(context.Background(), "h", "/etc/flaky", 0)
+	if err == nil {
+		t.Fatal("expected io.ReadAll error")
 	}
 }
 
@@ -271,7 +306,7 @@ func TestRead_OpenError(t *testing.T) {
 
 func TestWrite_Success(t *testing.T) {
 	ffs := newFakeFS()
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 
 	err := o.Write(context.Background(), "h", "/tmp/out.txt", []byte("hello"), 0, false)
 	if err != nil {
@@ -284,7 +319,7 @@ func TestWrite_Success(t *testing.T) {
 
 func TestWrite_WithMode(t *testing.T) {
 	ffs := newFakeFS()
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 
 	err := o.Write(context.Background(), "h", "/tmp/script.sh", []byte("#!/bin/sh"), 0755, false)
 	if err != nil {
@@ -295,7 +330,7 @@ func TestWrite_WithMode(t *testing.T) {
 func TestWrite_ChmodError(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.chmodErr = errors.New("chmod failed")
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 
 	err := o.Write(context.Background(), "h", "/tmp/f.sh", []byte("x"), 0755, false)
 	if err == nil {
@@ -307,7 +342,7 @@ func TestWrite_SizeLimitExceeded(t *testing.T) {
 	cfg := minCfg()
 	cfg.Limits.SFTPMaxWriteBytes = 4
 
-	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	o := newTestOps(cfg, okPool(), newFakeFS())
 	err := o.Write(context.Background(), "h", "/tmp/big.bin", bytes.Repeat([]byte("x"), 5), 0, false)
 	if err == nil {
 		t.Fatal("expected size limit error")
@@ -325,10 +360,39 @@ func TestWrite_PoolError(t *testing.T) {
 func TestWrite_OpenFileError(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.writeErr = errors.New("read only filesystem")
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	err := o.Write(context.Background(), "h", "/etc/locked", []byte("x"), 0, false)
 	if err == nil {
 		t.Fatal("expected open error")
+	}
+}
+
+func TestWrite_WriteError(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.captureWriteErr = errors.New("disk full")
+	o := newTestOps(minCfg(), okPool(), ffs)
+	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0, false)
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+}
+
+func TestWrite_CloseError(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.captureCloseErr = errors.New("connection reset")
+	o := newTestOps(minCfg(), okPool(), ffs)
+	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0, false)
+	if err == nil {
+		t.Fatal("expected close error")
+	}
+}
+
+func TestWrite_RefusesSpecialBitsInMode(t *testing.T) {
+	ffs := newFakeFS()
+	o := newTestOps(minCfg(), okPool(), ffs)
+	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0o4755, false) // setuid bit
+	if err == nil {
+		t.Fatal("expected error for mode with special bits set")
 	}
 }
 
@@ -341,7 +405,7 @@ func TestList_Success(t *testing.T) {
 		fakeFileInfo{name: "subdir", isDir: true, mode: fs.ModeDir | 0755},
 	}
 
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	entries, err := o.List(context.Background(), "h", "/tmp")
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -368,7 +432,7 @@ func TestList_PoolError(t *testing.T) {
 func TestList_ReadDirError(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.listErr = errors.New("directory not found")
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	_, err := o.List(context.Background(), "h", "/no/dir")
 	if err == nil {
 		t.Fatal("expected readdir error")
@@ -382,7 +446,7 @@ func TestValidateSFTPPath_SFTPDisabled(t *testing.T) {
 		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
 		Hosts:  map[string]config.Host{"h": {Address: "h:22", User: "u", SFTPEnabled: false}},
 	}
-	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	o := newTestOps(cfg, okPool(), newFakeFS())
 	_, _, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
 	if err == nil || !containsStr(err.Error(), "not enabled") {
 		t.Fatalf("expected SFTP-disabled error, got: %v", err)
@@ -390,7 +454,7 @@ func TestValidateSFTPPath_SFTPDisabled(t *testing.T) {
 }
 
 func TestValidateSFTPPath_RelativePath(t *testing.T) {
-	o := newTestOps(minCfg(), okPool(nil), newFakeFS())
+	o := newTestOps(minCfg(), okPool(), newFakeFS())
 	_, _, err := o.Read(context.Background(), "h", "../etc/passwd", 0)
 	if err == nil || !containsStr(err.Error(), "must be absolute") {
 		t.Fatalf("expected absolute-path error, got: %v", err)
@@ -404,7 +468,7 @@ func TestValidateSFTPPath_TraversalCleaned_ThenAllowlistRejected(t *testing.T) {
 			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
 		},
 	}
-	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	o := newTestOps(cfg, okPool(), newFakeFS())
 	// /srv/app/../etc/passwd cleans to /etc/passwd — outside the allowlist.
 	_, _, err := o.Read(context.Background(), "h", "/srv/app/../etc/passwd", 0)
 	if err == nil || !containsStr(err.Error(), "not under any allowed prefix") {
@@ -421,7 +485,7 @@ func TestValidateSFTPPath_AllowlistMatch(t *testing.T) {
 			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
 		},
 	}
-	o := newTestOps(cfg, okPool(nil), ffs)
+	o := newTestOps(cfg, okPool(), ffs)
 	_, _, err := o.Read(context.Background(), "h", "/srv/app/config.json", 0)
 	if err != nil {
 		t.Fatalf("unexpected error for path inside allowlist: %v", err)
@@ -436,7 +500,7 @@ func TestValidateSFTPPath_AllowlistPrefixEdgeCase(t *testing.T) {
 			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
 		},
 	}
-	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	o := newTestOps(cfg, okPool(), newFakeFS())
 	_, _, err := o.Read(context.Background(), "h", "/srv/apple/secret", 0)
 	if err == nil || !containsStr(err.Error(), "not under any allowed prefix") {
 		t.Fatalf("expected allowlist error for /srv/apple (edge case), got: %v", err)
@@ -453,7 +517,7 @@ func TestValidateSFTPPath_AllowlistExactMatch(t *testing.T) {
 			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
 		},
 	}
-	o := newTestOps(cfg, okPool(nil), ffs)
+	o := newTestOps(cfg, okPool(), ffs)
 	_, err := o.List(context.Background(), "h", "/srv/app")
 	if err != nil {
 		t.Fatalf("unexpected error for path equal to prefix: %v", err)
@@ -466,7 +530,7 @@ func TestValidateSFTPPath_EmptyAllowlist_DeniesAll(t *testing.T) {
 		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
 		Hosts:  map[string]config.Host{"h": {Address: "h:22", User: "u", SFTPEnabled: true}},
 	}
-	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	o := newTestOps(cfg, okPool(), newFakeFS())
 	_, _, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
 	if err == nil || !containsStr(err.Error(), "not under any allowed prefix") {
 		t.Fatalf("expected allowlist error for empty prefix list, got: %v", err)
@@ -477,7 +541,7 @@ func TestValidateSFTPPath_SlashPrefix_AllowsAnyAbsolute(t *testing.T) {
 	// "/" as a prefix is the explicit "allow all absolute paths" escape hatch.
 	ffs := newFakeFS()
 	ffs.files["/etc/hosts"] = []byte("127.0.0.1 localhost\n")
-	o := newTestOps(minCfg(), okPool(nil), ffs) // minCfg uses ["/"]
+	o := newTestOps(minCfg(), okPool(), ffs) // minCfg uses ["/"]
 	_, _, err := o.Read(context.Background(), "h", "/etc/hosts", 0)
 	if err != nil {
 		t.Fatalf("unexpected error with prefix [\"/\"]: %v", err)
@@ -489,7 +553,7 @@ func TestValidateSFTPPath_Write_Disabled(t *testing.T) {
 		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
 		Hosts:  map[string]config.Host{"h": {Address: "h:22", User: "u", SFTPEnabled: false}},
 	}
-	o := newTestOps(cfg, okPool(nil), newFakeFS())
+	o := newTestOps(cfg, okPool(), newFakeFS())
 	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0, false)
 	if err == nil || !containsStr(err.Error(), "not enabled") {
 		t.Fatalf("expected SFTP-disabled error, got: %v", err)
@@ -497,7 +561,7 @@ func TestValidateSFTPPath_Write_Disabled(t *testing.T) {
 }
 
 func TestValidateSFTPPath_List_RelativePath(t *testing.T) {
-	o := newTestOps(minCfg(), okPool(nil), newFakeFS())
+	o := newTestOps(minCfg(), okPool(), newFakeFS())
 	_, err := o.List(context.Background(), "h", "relative/dir")
 	if err == nil || !containsStr(err.Error(), "must be absolute") {
 		t.Fatalf("expected absolute-path error, got: %v", err)
@@ -652,7 +716,7 @@ func TestOpenSFTP_NewClientError(t *testing.T) {
 	badClientFactory := func(_ *ssh.Client) (sftpClientIface, error) {
 		return nil, errors.New("sftp init failed")
 	}
-	o := newOps(cfg, okPool(nil), badClientFactory)
+	o := newOps(cfg, okPool(), badClientFactory)
 	_, _, err := o.Read(context.Background(), "h", "/f", 0)
 	if err == nil {
 		t.Fatal("expected newClient error to propagate")
@@ -665,7 +729,7 @@ func TestWrite_Atomic_HappyPath(t *testing.T) {
 	ffs := newFakeFS()
 	ffs.files["/etc/app/config.yaml"] = []byte("old content")
 	// minCfg uses sftp_allowed_prefixes: ["/"] — allows any absolute path.
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	err := o.Write(context.Background(), "h", "/etc/app/config.yaml", []byte("new content"), 0, true)
 	if err != nil {
 		t.Fatalf("Write(atomic): %v", err)
@@ -685,7 +749,7 @@ func TestWrite_Atomic_WriteError_OriginalUntouched(t *testing.T) {
 	ffs.files["/etc/app/config.yaml"] = []byte("original")
 	ffs.writeErr = errors.New("disk full")
 	// minCfg uses sftp_allowed_prefixes: ["/"] — allows any absolute path.
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	err := o.Write(context.Background(), "h", "/etc/app/config.yaml", []byte("new"), 0, true)
 	if err == nil {
 		t.Fatal("expected error from failed write")
@@ -700,7 +764,7 @@ func TestWrite_Atomic_RenameError_TempRemoved(t *testing.T) {
 	ffs.files["/etc/app/config.yaml"] = []byte("original")
 	ffs.renameErr = errors.New("rename failed")
 	// minCfg uses sftp_allowed_prefixes: ["/"] — allows any absolute path.
-	o := newTestOps(minCfg(), okPool(nil), ffs)
+	o := newTestOps(minCfg(), okPool(), ffs)
 	err := o.Write(context.Background(), "h", "/etc/app/config.yaml", []byte("new"), 0, true)
 	if err == nil {
 		t.Fatal("expected error from rename failure")

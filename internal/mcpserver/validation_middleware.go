@@ -9,19 +9,25 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Field names repeated across multiple tools' known-field lists below.
+const (
+	fieldHost      = "host"
+	fieldTimeoutMs = "timeout_ms"
+)
+
 // toolFields maps tool name → known input field names.
 // Keep in sync with tool input structs in tools_*.go files.
 var toolFields = map[string][]string{
-	"ssh_session_open":      {"host", "name"},
-	"ssh_session_send":      {"session_id", "input", "timeout_ms", "wait_idle_ms", "raw"},
+	"ssh_session_open":      {fieldHost, "name"},
+	"ssh_session_send":      {"session_id", "input", fieldTimeoutMs, "wait_idle_ms", "raw"},
 	"ssh_session_close":     {"session_id"},
 	"ssh_session_list":      {},
-	"sftp_read":             {"host", "path", "max_bytes"},
-	"sftp_write":            {"host", "path", "content", "binary", "mode", "atomic"},
-	"sftp_list":             {"host", "path"},
-	"ssh_run_once":          {"host", "command", "stdin", "env", "timeout_ms", "detach"},
+	"sftp_read":             {fieldHost, "path", "max_bytes"},
+	"sftp_write":            {fieldHost, "path", "content", "binary", "mode", "atomic"},
+	"sftp_list":             {fieldHost, "path"},
+	"ssh_run_once":          {fieldHost, "command", "stdin", "env", fieldTimeoutMs, "detach"},
 	"ssh_list_hosts":        {},
-	"ssh_host_capabilities": {"host"},
+	"ssh_host_capabilities": {fieldHost},
 	"ssh_job_status":        {"job_id"},
 	"ssh_job_cancel":        {"job_id"},
 }

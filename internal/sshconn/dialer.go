@@ -20,8 +20,12 @@ type Dialer interface {
 // ProdDialer dials real SSH connections.
 type ProdDialer struct{}
 
+// Dial opens a real SSH connection to h, enforcing the handshake deadline and
+// translating known_hosts key-mismatch errors into an actionable hint.
+//
+//nolint:gocritic // hugeParam: h/limits are taken by value to satisfy the Dialer interface; converting to pointers would ripple into hostpool.Pool and every test fake.
 func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits) (*ssh.Client, error) {
-	cfg, err := BuildClientConfig(h)
+	cfg, err := BuildClientConfig(&h)
 	if err != nil {
 		return nil, fmt.Errorf("building SSH client config: %w", err)
 	}
@@ -37,9 +41,9 @@ func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits)
 	// handshake so long-lived SSH sessions are not killed when it expires.
 	// Skip when DialTimeout is zero (tests or explicit no-timeout config).
 	if limits.DialTimeout > 0 {
-		if err := conn.SetDeadline(time.Now().Add(limits.DialTimeout)); err != nil {
+		if deadlineErr := conn.SetDeadline(time.Now().Add(limits.DialTimeout)); deadlineErr != nil {
 			_ = conn.Close()
-			return nil, fmt.Errorf("setting SSH handshake deadline: %w", err)
+			return nil, fmt.Errorf("setting SSH handshake deadline: %w", deadlineErr)
 		}
 	}
 
@@ -59,9 +63,9 @@ func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits)
 	}
 
 	if limits.DialTimeout > 0 {
-		if err := conn.SetDeadline(time.Time{}); err != nil {
+		if clearErr := conn.SetDeadline(time.Time{}); clearErr != nil {
 			_ = sshConn.Close()
-			return nil, fmt.Errorf("clearing handshake deadline: %w", err)
+			return nil, fmt.Errorf("clearing handshake deadline: %w", clearErr)
 		}
 	}
 
@@ -69,7 +73,7 @@ func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits)
 }
 
 // BuildClientConfig assembles an *ssh.ClientConfig from a Host definition.
-func BuildClientConfig(h config.Host) (*ssh.ClientConfig, error) {
+func BuildClientConfig(h *config.Host) (*ssh.ClientConfig, error) {
 	authMethods, err := buildAuthMethods(h)
 	if err != nil {
 		return nil, err

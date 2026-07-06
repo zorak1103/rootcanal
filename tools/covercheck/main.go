@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	min := flag.Float64("min", 0, "minimum coverage percentage required")
+	minPct := flag.Float64("min", 0, "minimum coverage percentage required")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -18,6 +18,8 @@ func main() {
 		os.Exit(2)
 	}
 
+	// #nosec G204 — fixed command ("go tool cover"); the only variable part is a
+	// local coverage-file path in this dev-only build tool, not user/network input.
 	out, err := exec.Command("go", "tool", "cover", "-func="+flag.Arg(0)).Output()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "go tool cover: %v\n", err)
@@ -30,9 +32,9 @@ func main() {
 		os.Exit(2)
 	}
 
-	fmt.Printf("Coverage: %.1f%%  (min %.1f%%)\n", pct, *min)
-	if pct < *min {
-		fmt.Fprintf(os.Stderr, "FAIL: coverage %.1f%% is below %.1f%% minimum\n", pct, *min)
+	fmt.Printf("Coverage: %.1f%%  (min %.1f%%)\n", pct, *minPct)
+	if pct < *minPct {
+		fmt.Fprintf(os.Stderr, "FAIL: coverage %.1f%% is below %.1f%% minimum\n", pct, *minPct)
 		os.Exit(1)
 	}
 }

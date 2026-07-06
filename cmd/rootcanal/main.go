@@ -48,21 +48,7 @@ func main() {
 	}
 
 	if *probeFlag != "" {
-		h, ok := cfg.Hosts[*probeFlag]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "probe: host %q not found in config\n", *probeFlag)
-			os.Exit(1)
-		}
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
-		client, err := sshconn.ProdDialer{}.Dial(ctx, h, cfg.Limits)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "probe %q failed: %v\n", *probeFlag, err)
-			os.Exit(1)
-		}
-		_ = client.Close()
-		fmt.Printf("OK: connected to %s as %s\n", h.Address, h.User)
-		return
+		os.Exit(runProbe(*probeFlag, cfg))
 	}
 
 	// MCP server mode.
@@ -106,6 +92,27 @@ func main() {
 		log.Error("shutdown error", "err", err)
 	}
 	pool.Close()
+}
+
+// runProbe dials the named host and reports success/failure, returning the
+// process exit code. Kept separate from main so its deferred cancel() always
+// runs — main calls os.Exit(runProbe(...)) from a frame with no live defers.
+func runProbe(name string, cfg *config.Config) int {
+	h, ok := cfg.Hosts[name]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "probe: host %q not found in config\n", name)
+		return 1
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	client, err := sshconn.ProdDialer{}.Dial(ctx, h, cfg.Limits)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "probe %q failed: %v\n", name, err)
+		return 1
+	}
+	_ = client.Close()
+	fmt.Printf("OK: connected to %s as %s\n", h.Address, h.User)
+	return 0
 }
 
 func defaultConfigPath() string {

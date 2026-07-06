@@ -22,7 +22,8 @@ func Validate(cfg *Config) error {
 		return errors.New("config: no hosts defined")
 	}
 
-	for name, h := range cfg.Hosts {
+	for name := range cfg.Hosts {
+		h := cfg.Hosts[name]
 		if !hostNameRe.MatchString(name) {
 			errs = append(errs, fmt.Errorf("host %q: name must match [a-z0-9][a-z0-9._-]{0,62}", name))
 		}
@@ -46,7 +47,7 @@ func Validate(cfg *Config) error {
 			errs = append(errs, err)
 		}
 
-		if err := validateSFTPConfig(name, h); err != nil {
+		if err := validateSFTPConfig(name, &h); err != nil {
 			errs = append(errs, err)
 		}
 
@@ -58,16 +59,16 @@ func Validate(cfg *Config) error {
 
 func validateAuth(hostName string, a Auth) error {
 	switch a.Type {
-	case "key":
+	case AuthTypeKey:
 		if a.KeyPath == "" {
 			return fmt.Errorf("host %q auth: key_path is required for type 'key'", hostName)
 		}
 		if _, err := os.Stat(expandPath(a.KeyPath)); err != nil {
 			return fmt.Errorf("host %q auth: key_path %q: %w", hostName, a.KeyPath, err)
 		}
-	case "agent":
+	case AuthTypeAgent:
 		// no additional requirements
-	case "password":
+	case AuthTypePassword:
 		if a.PasswordEnv == "" {
 			return fmt.Errorf("host %q auth: password_env is required for type 'password'", hostName)
 		}
@@ -113,7 +114,7 @@ func normalizeAddress(addr string) (string, error) {
 	return net.JoinHostPort(addr, "22"), nil
 }
 
-func validateSFTPConfig(hostName string, h Host) error {
+func validateSFTPConfig(hostName string, h *Host) error {
 	if len(h.SFTPAllowedPrefixes) > 0 && !h.SFTPEnabled {
 		return fmt.Errorf("host %q: sftp_allowed_prefixes requires sftp_enabled: true", hostName)
 	}

@@ -16,7 +16,7 @@ import (
 // hostKeyCallback returns a strict known_hosts-based host key callback and the
 // algorithm list pinned to the entry stored for hostport. Pinning prevents a
 // server from negotiating a weaker algorithm than the one the key was recorded with.
-func hostKeyCallback(h config.Host, hostport string) (ssh.HostKeyCallback, []string, error) {
+func hostKeyCallback(h *config.Host, hostport string) (ssh.HostKeyCallback, []string, error) {
 	path := ResolveKnownHosts(h.KnownHosts)
 	if err := fileperms.Check(path); err != nil {
 		return nil, nil, err

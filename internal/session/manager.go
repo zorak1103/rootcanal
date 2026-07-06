@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -26,10 +27,15 @@ const (
 const lostAdvisory = "connection lost — the remote shell and its state are gone; " +
 	"reopen the session to continue (a fresh connection will be established automatically)"
 
+// closedReasonLost is the SendResult.ClosedReason / SessionInfo.ClosedReason value
+// used when the underlying SSH session died unexpectedly (as opposed to a clean
+// "exit" or an operator-initiated close).
+const closedReasonLost = "lost"
+
 // appendLostWarning appends the reconnect advisory to res.Warnings when
 // ClosedReason is "lost". All other reasons pass through unchanged.
 func appendLostWarning(res SendResult) SendResult {
-	if res.ClosedReason == "lost" {
+	if res.ClosedReason == closedReasonLost {
 		res.Warnings = append(res.Warnings, lostAdvisory)
 	}
 	return res
@@ -124,6 +130,51 @@ type manager struct {
 	gcDone chan struct{}
 }
 
+// reserveSlot atomically checks shutdown/limit/name-collision state and, if
+// all checks pass, reserves a pending slot for host. Both the checks and the
+// increment happen under the same lock so no concurrent Open() can slip
+// through the gap between check and increment. Callers must roll back the
+// reservation (decrement m.pending/m.perHost) on any subsequent failure.
+func (m *manager) reserveSlot(host, name string) error {
+	limits := m.cfg.Limits
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.stopping {
+		return fmt.Errorf("manager is shutting down")
+	}
+	if limits.MaxSessionsTotal > 0 && len(m.sessions)+m.pending >= limits.MaxSessionsTotal {
+		return fmt.Errorf("global session limit of %d reached", limits.MaxSessionsTotal)
+	}
+	if limits.MaxSessionsPerHost > 0 && m.perHost[host] >= limits.MaxSessionsPerHost {
+		return fmt.Errorf("host %q: per-host session limit of %d reached", host, limits.MaxSessionsPerHost)
+	}
+	if name != "" {
+		for _, s := range m.sessions {
+			if s.name == name {
+				return fmt.Errorf("session name %q already in use", name)
+			}
+		}
+	}
+	m.pending++
+	m.perHost[host]++
+	return nil
+}
+
+// finalizeSession registers s under id in m.sessions, fulfilling the
+// reservation reserveSlot made earlier, unless the manager has since started
+// shutting down.
+func (m *manager) finalizeSession(s *session, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopping {
+		return fmt.Errorf("manager is shutting down")
+	}
+	m.sessions[id] = s
+	m.pending-- // reservation fulfilled; slot now counted in len(m.sessions)
+	return nil
+}
+
 func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	if _, ok := m.cfg.Hosts[host]; !ok {
 		return "", config.UnknownHostError(host)
@@ -138,32 +189,9 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	limits := m.cfg.Limits
 
 	// Atomically reserve a session slot before calling the factory.
-	// Both checks happen under the same lock so no concurrent Open() can
-	// slip through the gap between check and increment.
-	m.mu.Lock()
-	if m.stopping {
-		m.mu.Unlock()
-		return "", fmt.Errorf("manager is shutting down")
+	if err := m.reserveSlot(host, name); err != nil {
+		return "", err
 	}
-	if limits.MaxSessionsTotal > 0 && len(m.sessions)+m.pending >= limits.MaxSessionsTotal {
-		m.mu.Unlock()
-		return "", fmt.Errorf("global session limit of %d reached", limits.MaxSessionsTotal)
-	}
-	if limits.MaxSessionsPerHost > 0 && m.perHost[host] >= limits.MaxSessionsPerHost {
-		m.mu.Unlock()
-		return "", fmt.Errorf("host %q: per-host session limit of %d reached", host, limits.MaxSessionsPerHost)
-	}
-	if name != "" {
-		for _, s := range m.sessions {
-			if s.name == name {
-				m.mu.Unlock()
-				return "", fmt.Errorf("session name %q already in use", name)
-			}
-		}
-	}
-	m.pending++
-	m.perHost[host]++
-	m.mu.Unlock()
 
 	// On any failure path, roll back the reservation.
 	handedOff := false
@@ -187,27 +215,9 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	buf := newRingBuf(limits.OutputBufferBytes)
 	sshSess.setOutput(buf)
 
-	if err := sshSess.RequestPty(ptyTerm, ptyHeight, ptyWidth, ssh.TerminalModes{
-		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
-	}); err != nil {
-		_ = sshSess.Close()
-		releasePool()
-		return "", fmt.Errorf("requesting PTY for %q: %w", host, err)
-	}
-
-	stdin, err := sshSess.StdinPipe()
+	stdin, err := startShellSession(sshSess, host, releasePool)
 	if err != nil {
-		_ = sshSess.Close()
-		releasePool()
-		return "", fmt.Errorf("getting stdin pipe for %q: %w", host, err)
-	}
-
-	if err := sshSess.Shell(); err != nil {
-		_ = sshSess.Close()
-		releasePool()
-		return "", fmt.Errorf("starting shell on %q: %w", host, err)
+		return "", err
 	}
 
 	now := time.Now()
@@ -237,43 +247,73 @@ func (m *manager) Open(ctx context.Context, host, name string) (string, error) {
 	}
 	s.id = id
 
-	m.mu.Lock()
-	if m.stopping {
-		m.mu.Unlock()
+	if err := m.finalizeSession(s, id); err != nil {
 		_ = sshSess.Close()
 		releasePool()
-		return "", fmt.Errorf("manager is shutting down")
+		return "", err
 	}
-	m.sessions[id] = s
-	m.pending-- // reservation fulfilled; slot now counted in len(m.sessions)
 	handedOff = true
-	m.mu.Unlock()
 
 	// Launch Wait goroutine after registration so Shutdown cannot miss this session.
-	go func() {
-		err := sshSess.Wait()
-		s.mu.Lock()
-		if !s.closed { // explicit Close() already set this
-			s.closed = true
-			var exitErr *ssh.ExitError
-			var missingErr *ssh.ExitMissingError
-			switch {
-			case err == nil:
-				s.closedReason = "exit"
-			case errors.As(err, &exitErr):
-				s.closedReason = "exit"
-			case errors.As(err, &missingErr):
-				s.closedReason = "lost"
-			default:
-				s.closedReason = "lost"
-			}
-		}
-		s.mu.Unlock()
-		close(s.done)
-	}()
+	go watchSessionExit(s, sshSess)
 
 	m.log.Info("session opened", "id", id, "host", host)
 	return id, nil
+}
+
+// startShellSession requests a PTY, opens the stdin pipe, and starts the
+// remote shell on sshSess. On any failure it closes sshSess and releases the
+// pool reference before returning the error.
+func startShellSession(sshSess sshSession, host string, releasePool func()) (io.WriteCloser, error) {
+	if ptyErr := sshSess.RequestPty(ptyTerm, ptyHeight, ptyWidth, ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}); ptyErr != nil {
+		_ = sshSess.Close()
+		releasePool()
+		return nil, fmt.Errorf("requesting PTY for %q: %w", host, ptyErr)
+	}
+
+	stdin, err := sshSess.StdinPipe()
+	if err != nil {
+		_ = sshSess.Close()
+		releasePool()
+		return nil, fmt.Errorf("getting stdin pipe for %q: %w", host, err)
+	}
+
+	if err := sshSess.Shell(); err != nil {
+		_ = sshSess.Close()
+		releasePool()
+		return nil, fmt.Errorf("starting shell on %q: %w", host, err)
+	}
+	return stdin, nil
+}
+
+// watchSessionExit blocks on sshSess.Wait() and records why the session
+// closed (unless an explicit Close() already did), then closes s.done to
+// unblock any Send/waitForMarker callers waiting on it. Intended to run in
+// its own goroutine, launched once s has been registered in m.sessions.
+func watchSessionExit(s *session, sshSess sshSession) {
+	err := sshSess.Wait()
+	s.mu.Lock()
+	if !s.closed { // explicit Close() already set this
+		s.closed = true
+		var exitErr *ssh.ExitError
+		var missingErr *ssh.ExitMissingError
+		switch {
+		case err == nil:
+			s.closedReason = "exit"
+		case errors.As(err, &exitErr):
+			s.closedReason = "exit"
+		case errors.As(err, &missingErr):
+			s.closedReason = closedReasonLost
+		default:
+			s.closedReason = closedReasonLost
+		}
+	}
+	s.mu.Unlock()
+	close(s.done)
 }
 
 // bootSession initialises a freshly started shell: suppresses MOTD and sets
@@ -326,17 +366,7 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		return SendResult{}, fmt.Errorf("input and wait_idle_ms are mutually exclusive")
 	}
 
-	var warnings []string
-	timeout := time.Duration(in.TimeoutMs) * time.Millisecond
-	if timeout <= 0 {
-		timeout = time.Duration(m.cfg.Limits.DefaultSendTimeoutMs) * time.Millisecond
-	}
-	maxTimeout := time.Duration(m.cfg.Limits.MaxSendTimeoutMs) * time.Millisecond
-	if maxTimeout > 0 && timeout > maxTimeout {
-		warnings = append(warnings, fmt.Sprintf("timeout_ms clamped from %d to %d",
-			in.TimeoutMs, m.cfg.Limits.MaxSendTimeoutMs))
-		timeout = maxTimeout
-	}
+	timeout, warnings := m.resolveSendTimeout(in.TimeoutMs)
 
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
@@ -348,22 +378,9 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		return appendLostWarning(SendResult{ClosedReason: cr, Warnings: warnings}), nil
 	}
 
-	// Peek mode: wait for idle, no marker injection.
+	// Peek mode: wait for idle, no marker injection. sendPeek unlocks s.mu.
 	if in.WaitIdleMs > 0 {
-		s.lastUsedAt = time.Now()
-		s.mu.Unlock()
-		idleDur := time.Duration(in.WaitIdleMs) * time.Millisecond
-		s.out.WaitForData(ctx, idleDur, idleDur)
-		out, trunc := s.out.Drain()
-		s.mu.Lock()
-		cr := s.closedReason
-		s.mu.Unlock()
-		return appendLostWarning(SendResult{
-			Output:       string(cleanOutput(out)),
-			Truncated:    trunc,
-			ClosedReason: cr,
-			Warnings:     warnings,
-		}), nil
+		return m.sendPeek(ctx, s, in, warnings), nil
 	}
 
 	// Continuation mode: empty input waits for in-flight marker.
@@ -384,29 +401,80 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 		return SendResult{}, fmt.Errorf("command still in flight; send empty input to continue waiting")
 	}
 
-	// Raw mode: write as-is, no marker.
+	// Raw mode: write as-is, no marker. sendRaw unlocks s.mu.
 	if in.Raw {
-		s.lastUsedAt = time.Now()
-		s.mu.Unlock()
-		ch := make(chan error, 1)
-		go func() { _, err := s.stdin.Write([]byte(in.Input)); ch <- err }()
-		select {
-		case err := <-ch:
-			if err != nil {
-				return SendResult{}, fmt.Errorf("writing to session %q stdin: %w", id, err)
-			}
-		case <-ctx.Done():
-			return SendResult{}, ctx.Err()
-		}
-		s.out.WaitForData(ctx, quiesce, timeout)
-		out, trunc := s.out.Drain()
-		s.mu.Lock()
-		cr := s.closedReason
-		s.mu.Unlock()
-		return appendLostWarning(SendResult{Output: string(out), Truncated: trunc, ClosedReason: cr, Warnings: warnings}), nil
+		return m.sendRaw(ctx, s, id, in, warnings, timeout)
 	}
 
-	// Normal mode: inject exit marker.
+	// Normal mode: inject exit marker. sendNormal unlocks s.mu.
+	return m.sendNormal(ctx, s, id, in, warnings, timeout)
+}
+
+// resolveSendTimeout computes the effective per-Send timeout from the
+// caller's requested value (reqMs, 0 = "use the configured default"),
+// clamped to the configured ceiling. It returns a warning when clamped.
+func (m *manager) resolveSendTimeout(reqMs int) (timeout time.Duration, warnings []string) {
+	timeout = time.Duration(reqMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = time.Duration(m.cfg.Limits.DefaultSendTimeoutMs) * time.Millisecond
+	}
+	maxTimeout := time.Duration(m.cfg.Limits.MaxSendTimeoutMs) * time.Millisecond
+	if maxTimeout > 0 && timeout > maxTimeout {
+		warnings = append(warnings, fmt.Sprintf("timeout_ms clamped from %d to %d",
+			reqMs, m.cfg.Limits.MaxSendTimeoutMs))
+		timeout = maxTimeout
+	}
+	return timeout, warnings
+}
+
+// sendPeek implements Send's peek mode (wait_idle_ms > 0): wait for the
+// output stream to go idle and return whatever accumulated, without marker
+// injection. Must be called with s.mu held; unlocks it before returning.
+func (m *manager) sendPeek(ctx context.Context, s *session, in SendInput, warnings []string) SendResult {
+	s.lastUsedAt = time.Now()
+	s.mu.Unlock()
+	idleDur := time.Duration(in.WaitIdleMs) * time.Millisecond
+	s.out.WaitForData(ctx, idleDur, idleDur)
+	out, trunc := s.out.Drain()
+	s.mu.Lock()
+	cr := s.closedReason
+	s.mu.Unlock()
+	return appendLostWarning(SendResult{
+		Output:       string(cleanOutput(out)),
+		Truncated:    trunc,
+		ClosedReason: cr,
+		Warnings:     warnings,
+	})
+}
+
+// sendRaw implements Send's raw mode (in.Raw=true): writes input verbatim
+// with no marker injection, then returns whatever the shell produced after a
+// quiescence window. Must be called with s.mu held; unlocks it before returning.
+func (m *manager) sendRaw(ctx context.Context, s *session, id string, in SendInput, warnings []string, timeout time.Duration) (SendResult, error) {
+	s.lastUsedAt = time.Now()
+	s.mu.Unlock()
+	ch := make(chan error, 1)
+	go func() { _, err := s.stdin.Write([]byte(in.Input)); ch <- err }()
+	select {
+	case err := <-ch:
+		if err != nil {
+			return SendResult{}, fmt.Errorf("writing to session %q stdin: %w", id, err)
+		}
+	case <-ctx.Done():
+		return SendResult{}, ctx.Err()
+	}
+	s.out.WaitForData(ctx, quiesce, timeout)
+	out, trunc := s.out.Drain()
+	s.mu.Lock()
+	cr := s.closedReason
+	s.mu.Unlock()
+	return appendLostWarning(SendResult{Output: string(out), Truncated: trunc, ClosedReason: cr, Warnings: warnings}), nil
+}
+
+// sendNormal implements Send's default mode: injects an exit-code marker
+// after the command and waits for it via waitForMarker. Must be called with
+// s.mu held and s.inflight == nil already verified; unlocks s.mu before returning.
+func (m *manager) sendNormal(ctx context.Context, s *session, id string, in SendInput, warnings []string, timeout time.Duration) (SendResult, error) {
 	nonce := newMarkerNonce()
 	s.inflight = &inflight{nonce: nonce, input: in.Input}
 	s.lastUsedAt = time.Now()
@@ -473,54 +541,11 @@ func (m *manager) waitForMarker(
 		}
 
 		if before, rest, found := bytes.Cut(accumulated, markerPrefix); found {
-			// Extract exit code from: \nRC_EXIT_<nonce>_<code>\n
-			end := bytes.IndexByte(rest, '\n')
-			if end < 0 {
-				end = len(rest)
-			}
-			code, _ := strconv.Atoi(strings.TrimSpace(string(rest[:end])))
-
-			output := before
-			if !raw {
-				output = cleanOutput(output)
-			}
-
-			s.mu.Lock()
-			s.inflight = nil
-			ec := code
-			s.lastExitCode = &ec
-			s.lastUsedAt = time.Now()
-			cr := s.closedReason
-			s.mu.Unlock()
-
-			return SendResult{
-				Output:       string(output),
-				ExitCode:     &code,
-				Truncated:    trunc,
-				ClosedReason: cr,
-				Warnings:     warnings,
-			}, nil
+			return markerFoundResult(s, before, rest, raw, trunc, warnings), nil
 		}
 
-		// Check if session closed while waiting.
-		select {
-		case <-s.done:
-			output := accumulated
-			if !raw {
-				output = cleanOutput(output)
-			}
-			s.mu.Lock()
-			s.inflight = nil
-			cr := s.closedReason
-			s.lastUsedAt = time.Now()
-			s.mu.Unlock()
-			return SendResult{
-				Output:       string(output),
-				Truncated:    trunc,
-				ClosedReason: cr,
-				Warnings:     warnings,
-			}, nil
-		default:
+		if res, closed := sessionClosedResult(s, accumulated, raw, trunc, warnings); closed {
+			return res, nil
 		}
 
 		if ctx.Err() != nil {
@@ -547,6 +572,65 @@ func (m *manager) waitForMarker(
 		Truncated:    trunc,
 		Warnings:     warnings,
 	}, nil
+}
+
+// markerFoundResult finalizes a Send/waitForMarker call once the exit marker
+// (\nRC_EXIT_<nonce>_<code>\n, already split into before/rest by bytes.Cut)
+// was found: it parses the exit code, clears s.inflight, and records the
+// code as the session's last exit code.
+func markerFoundResult(s *session, before, rest []byte, raw, trunc bool, warnings []string) SendResult {
+	end := bytes.IndexByte(rest, '\n')
+	if end < 0 {
+		end = len(rest)
+	}
+	code, _ := strconv.Atoi(strings.TrimSpace(string(rest[:end])))
+
+	output := before
+	if !raw {
+		output = cleanOutput(output)
+	}
+
+	s.mu.Lock()
+	s.inflight = nil
+	ec := code
+	s.lastExitCode = &ec
+	s.lastUsedAt = time.Now()
+	cr := s.closedReason
+	s.mu.Unlock()
+
+	return SendResult{
+		Output:       string(output),
+		ExitCode:     &code,
+		Truncated:    trunc,
+		ClosedReason: cr,
+		Warnings:     warnings,
+	}
+}
+
+// sessionClosedResult checks whether s closed while waitForMarker was
+// polling (s.done already fired). If so, it returns the final SendResult and
+// true; otherwise the zero SendResult and false.
+func sessionClosedResult(s *session, accumulated []byte, raw, trunc bool, warnings []string) (SendResult, bool) {
+	select {
+	case <-s.done:
+		output := accumulated
+		if !raw {
+			output = cleanOutput(output)
+		}
+		s.mu.Lock()
+		s.inflight = nil
+		cr := s.closedReason
+		s.lastUsedAt = time.Now()
+		s.mu.Unlock()
+		return SendResult{
+			Output:       string(output),
+			Truncated:    trunc,
+			ClosedReason: cr,
+			Warnings:     warnings,
+		}, true
+	default:
+		return SendResult{}, false
+	}
 }
 
 func (m *manager) Close(_ context.Context, id string) (string, error) {

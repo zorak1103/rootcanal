@@ -11,13 +11,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func buildAuthMethods(h config.Host) ([]ssh.AuthMethod, error) {
+func buildAuthMethods(h *config.Host) ([]ssh.AuthMethod, error) {
 	switch h.Auth.Type {
-	case "key":
+	case config.AuthTypeKey:
 		return buildKeyAuth(h.Auth)
-	case "agent":
+	case config.AuthTypeAgent:
 		return buildAgentAuth()
-	case "password":
+	case config.AuthTypePassword:
 		return buildPasswordAuth(h.Auth)
 	default:
 		return nil, fmt.Errorf("unknown auth type %q", h.Auth.Type)

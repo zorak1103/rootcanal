@@ -18,6 +18,50 @@ import (
 // return the real exit code rather than having us send SIGTERM and lose it.
 const drainGrace = 2 * time.Second
 
+// resolveRunTimeout computes the effective wall-clock timeout (ms) for
+// RunOnce from the caller's requested value (reqMs, 0 = "use the default")
+// and the configured ceiling (maxMs, 0 = "no ceiling configured"). It returns
+// a non-empty warning when the requested value had to be clamped down to
+// maxMs.
+func resolveRunTimeout(reqMs, maxMs int) (timeoutMs int, warning string) {
+	timeoutMs = reqMs
+	if timeoutMs <= 0 {
+		timeoutMs = maxMs
+	}
+	if maxMs > 0 && timeoutMs > maxMs {
+		warning = fmt.Sprintf("timeout_ms clamped from %d to %d", reqMs, maxMs)
+		timeoutMs = maxMs
+	}
+	if timeoutMs <= 0 {
+		timeoutMs = 30000 // hard fallback if config defaults were not applied
+	}
+	return timeoutMs, warning
+}
+
+// runWithDeadline executes cmd on sess and waits for it to finish or runCtx
+// to expire. If the deadline fires, the process may have already exited and
+// the SSH library may still be draining buffered output (issue #15); this
+// gives it a short grace window before forcibly sending SIGTERM and closing
+// the session. killedByDeadline is true only when that forced path was taken.
+func runWithDeadline(sess *ssh.Session, cmd string, runCtx context.Context) (runErr error, killedByDeadline bool) {
+	runDone := make(chan error, 1)
+	go func() { runDone <- sess.Run(cmd) }()
+
+	select {
+	case runErr = <-runDone:
+	case <-runCtx.Done():
+		select {
+		case runErr = <-runDone:
+		case <-time.After(drainGrace):
+			killedByDeadline = true
+			_ = sess.Signal(ssh.SIGTERM)
+			_ = sess.Close()
+			runErr = <-runDone
+		}
+	}
+	return runErr, killedByDeadline
+}
+
 // runClassification is the structured outcome of classifyRunResult.
 type runClassification struct {
 	ExitCode  int
@@ -33,7 +77,7 @@ type runClassification struct {
 //   - isExitErr: true when err was nil (success) or *ssh.ExitError; false for hard IO errors
 //   - killedByDeadline: true when the run harness itself sent the SIGTERM
 //   - timeoutMs: the configured wall-clock cap in milliseconds (used in warnings)
-func classifyRunResult(exitCode int, signal string, isExitErr bool, killedByDeadline bool, timeoutMs int) runClassification {
+func classifyRunResult(exitCode int, signal string, isExitErr, killedByDeadline bool, timeoutMs int) runClassification {
 	if !isExitErr {
 		return runClassification{HardError: true}
 	}
@@ -130,7 +174,7 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 	if err != nil {
 		return RunOnceOutput{}, fmt.Errorf("opening exec session on %q: %w", host, err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	var warnings []string
 	for k, v := range in.Env {
@@ -153,44 +197,15 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 		sess.Stdin = bytes.NewBufferString(in.Stdin)
 	}
 
-	timeoutMs := in.TimeoutMs
-	if timeoutMs <= 0 {
-		timeoutMs = m.cfg.Limits.RunOnceMaxTimeoutMs
-	}
-	maxTimeoutMs := m.cfg.Limits.RunOnceMaxTimeoutMs
-	if maxTimeoutMs > 0 && timeoutMs > maxTimeoutMs {
-		warnings = append(warnings, fmt.Sprintf("timeout_ms clamped from %d to %d", in.TimeoutMs, maxTimeoutMs))
-		timeoutMs = maxTimeoutMs
-	}
-	if timeoutMs <= 0 {
-		timeoutMs = 30000 // hard fallback if config defaults were not applied
+	timeoutMs, timeoutWarning := resolveRunTimeout(in.TimeoutMs, m.cfg.Limits.RunOnceMaxTimeoutMs)
+	if timeoutWarning != "" {
+		warnings = append(warnings, timeoutWarning)
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	runDone := make(chan error, 1)
-	go func() { runDone <- sess.Run(in.Command) }()
-
-	var (
-		runErr           error
-		killedByDeadline bool
-	)
-	select {
-	case runErr = <-runDone:
-	case <-runCtx.Done():
-		// Deadline fired. The process may have already exited and the SSH library
-		// is still draining buffered output (issue #15). Give the drain a short
-		// grace window before forcibly sending SIGTERM.
-		select {
-		case runErr = <-runDone:
-		case <-time.After(drainGrace):
-			killedByDeadline = true
-			_ = sess.Signal(ssh.SIGTERM)
-			_ = sess.Close()
-			runErr = <-runDone
-		}
-	}
+	runErr, killedByDeadline := runWithDeadline(sess, in.Command, runCtx)
 
 	out := RunOnceOutput{
 		Stdout:    stdout.String(),

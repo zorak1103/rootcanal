@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// tempFile writes content to a temp file and returns its path.
-func tempFile(t *testing.T, name, content string) string {
+// tempFile writes content to a "cfg.yaml" temp file and returns its path.
+func tempFile(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
+	path := filepath.Join(t.TempDir(), "cfg.yaml")
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ hosts:
       key_path: %s
 `, knownHosts, keyPath)
 
-	cfg, err := Load(tempFile(t, "cfg.yaml", yaml))
+	cfg, err := Load(tempFile(t, yaml))
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
@@ -142,7 +142,7 @@ hosts:
       type: agent
 `, knownHosts)
 
-	cfg, err := Load(tempFile(t, "cfg.yaml", yaml))
+	cfg, err := Load(tempFile(t, yaml))
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
@@ -169,7 +169,7 @@ hosts:
       password_env: TEST_RC_PASSWORD
 `, knownHosts)
 
-	_, err := Load(tempFile(t, "cfg.yaml", yaml))
+	_, err := Load(tempFile(t, yaml))
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
@@ -191,7 +191,7 @@ hosts:
       type: agent
 `, knownHosts)
 
-	_, err := Load(tempFile(t, "cfg.yaml", yaml))
+	_, err := Load(tempFile(t, yaml))
 	if err == nil {
 		t.Fatal("expected error for unknown field")
 	}
@@ -207,7 +207,7 @@ hosts:
     auth:
       type: agent
 `
-	_, err := Load(tempFile(t, "cfg.yaml", yaml))
+	_, err := Load(tempFile(t, yaml))
 	if err == nil {
 		t.Fatal("expected error for missing env var")
 	}
@@ -218,14 +218,14 @@ hosts:
 
 func TestLoad_NoHosts(t *testing.T) {
 	yaml := "limits:\n  max_sessions_total: 8\n"
-	_, err := Load(tempFile(t, "cfg.yaml", yaml))
+	_, err := Load(tempFile(t, yaml))
 	if err == nil {
 		t.Fatal("expected error for empty hosts")
 	}
 }
 
 func TestLoad_InvalidYAML(t *testing.T) {
-	_, err := Load(tempFile(t, "cfg.yaml", "{\n  broken yaml here {{"))
+	_, err := Load(tempFile(t, "{\n  broken yaml here {{"))
 	if err == nil {
 		t.Fatal("expected parse error")
 	}
@@ -247,7 +247,7 @@ hosts:
       type: agent
 `, knownHosts)
 
-	cfg, err := Load(tempFile(t, "cfg.yaml", yaml))
+	cfg, err := Load(tempFile(t, yaml))
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
@@ -284,7 +284,7 @@ hosts:
       type: agent
 `, knownHosts)
 
-	cfg, err := Load(tempFile(t, "cfg.yaml", yaml))
+	cfg, err := Load(tempFile(t, yaml))
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
@@ -306,7 +306,7 @@ hosts:
     auth:
       type: agent
 `
-	_, err := Load(tempFile(t, "cfg.yaml", yaml))
+	_, err := Load(tempFile(t, yaml))
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
@@ -551,18 +551,16 @@ func TestExpandPath(t *testing.T) {
 
 // ---- SFTP config validation tests ----
 
-func validHostCfg(t *testing.T) (kh string, keyPath string) {
+func validHostCfg(t *testing.T) (kh string) {
 	t.Helper()
 	dir := t.TempDir()
 	kh = filepath.Join(dir, "known_hosts")
-	keyPath = filepath.Join(dir, "id_ed25519")
 	_ = os.WriteFile(kh, []byte("kh"), 0600)
-	_ = os.WriteFile(keyPath, []byte("key"), 0600)
-	return kh, keyPath
+	return kh
 }
 
 func TestValidate_SFTPEnabled_NoPrefix(t *testing.T) {
-	kh, _ := validHostCfg(t)
+	kh := validHostCfg(t)
 	cfg := &Config{Hosts: map[string]Host{
 		"h": {Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"}, SFTPEnabled: true},
 	}}
@@ -572,7 +570,7 @@ func TestValidate_SFTPEnabled_NoPrefix(t *testing.T) {
 }
 
 func TestValidate_SFTPEnabled_WithCleanAbsolutePrefixes(t *testing.T) {
-	kh, _ := validHostCfg(t)
+	kh := validHostCfg(t)
 	cfg := &Config{Hosts: map[string]Host{
 		"h": {
 			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
@@ -586,7 +584,7 @@ func TestValidate_SFTPEnabled_WithCleanAbsolutePrefixes(t *testing.T) {
 }
 
 func TestValidate_SFTPPrefix_RequiresSFTPEnabled(t *testing.T) {
-	kh, _ := validHostCfg(t)
+	kh := validHostCfg(t)
 	cfg := &Config{Hosts: map[string]Host{
 		"h": {
 			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
@@ -600,7 +598,7 @@ func TestValidate_SFTPPrefix_RequiresSFTPEnabled(t *testing.T) {
 }
 
 func TestValidate_SFTPPrefix_RelativeRejected(t *testing.T) {
-	kh, _ := validHostCfg(t)
+	kh := validHostCfg(t)
 	cfg := &Config{Hosts: map[string]Host{
 		"h": {
 			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
@@ -614,7 +612,7 @@ func TestValidate_SFTPPrefix_RelativeRejected(t *testing.T) {
 }
 
 func TestValidate_SFTPPrefix_UncleanRejected(t *testing.T) {
-	kh, _ := validHostCfg(t)
+	kh := validHostCfg(t)
 	cfg := &Config{Hosts: map[string]Host{
 		"h": {
 			Address: "h:22", User: "u", KnownHosts: kh, Auth: Auth{Type: "agent"},
@@ -719,7 +717,7 @@ func TestCapabilities_TermAndCleanOutput(t *testing.T) {
 }
 
 func TestLoad_SFTPFields_RoundTrip(t *testing.T) {
-	kh, _ := validHostCfg(t)
+	kh := validHostCfg(t)
 	yaml := fmt.Sprintf(`
 hosts:
   h:
@@ -733,7 +731,7 @@ hosts:
       - /srv/app
       - /var/log
 `, kh)
-	cfg, err := Load(tempFile(t, "cfg.yaml", yaml))
+	cfg, err := Load(tempFile(t, yaml))
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}

@@ -191,6 +191,36 @@ func TestRegistry_AppendOutputOverCap(t *testing.T) {
 	}
 }
 
+func TestRegistry_UnknownJobID_NoOps(t *testing.T) {
+	reg := jobs.NewRegistry(10, time.Minute)
+	defer reg.Close()
+
+	const missing = "j_does_not_exist"
+	// None of these should panic; all silently no-op for an unknown ID.
+	reg.MarkDone(missing, nil)
+	reg.SetCancel(missing, func() { t.Error("cancel func must not be called for an unknown job") })
+	reg.Cancel(missing)
+	reg.AppendStdout(missing, []byte("x"))
+	reg.AppendStderr(missing, []byte("x"))
+
+	if _, ok := reg.Get(missing); ok {
+		t.Error("Get should report not-found for an unknown job ID")
+	}
+}
+
+func TestJob_StderrTail_Truncates(t *testing.T) {
+	reg := jobs.NewRegistry(10, time.Minute)
+	defer reg.Close()
+
+	id, _ := reg.TryRegister("h", "cmd", 1)
+	reg.AppendStderr(id, []byte("0123456789"))
+
+	job, _ := reg.Get(id)
+	if got := job.StderrTail(4); got != "6789" {
+		t.Errorf("StderrTail(4) = %q, want %q", got, "6789")
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr2(s, sub))
 }

@@ -20,8 +20,12 @@ type Scanner interface {
 // ProdScanner is the production Scanner implementation.
 type ProdScanner struct{}
 
+// ScanHostKey captures the live host key of h without verifying it against
+// known_hosts. See the package-level ScanHostKey function for details.
+//
+//nolint:gocritic // hugeParam: h/limits are taken by value to satisfy the Scanner interface; converting to pointers would ripple into hostkeys.Refresher and every test fake.
 func (ProdScanner) ScanHostKey(ctx context.Context, h config.Host, limits config.Limits) (ssh.PublicKey, error) {
-	return ScanHostKey(ctx, h, limits)
+	return ScanHostKey(ctx, &h, limits)
 }
 
 // ScanHostKey dials h.Address and returns the host key the server presents,
@@ -29,7 +33,9 @@ func (ProdScanner) ScanHostKey(ctx context.Context, h config.Host, limits config
 // authentication, so no credentials are used. This is the only place in
 // rootcanal that bypasses host-key verification; its sole purpose is to
 // surface a fingerprint for human confirmation before re-trusting a rebuilt host.
-func ScanHostKey(ctx context.Context, h config.Host, limits config.Limits) (ssh.PublicKey, error) {
+//
+//nolint:gocritic // hugeParam: limits (config.Limits, 168 bytes) is used by value throughout the codebase; h is already a pointer (see ProdScanner.ScanHostKey above).
+func ScanHostKey(ctx context.Context, h *config.Host, limits config.Limits) (ssh.PublicKey, error) {
 	var captured ssh.PublicKey
 	captureCB := func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		captured = key
@@ -47,7 +53,7 @@ func ScanHostKey(ctx context.Context, h config.Host, limits config.Limits) (ssh.
 	if err != nil {
 		return nil, fmt.Errorf("TCP connection failed: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Bound the key-exchange phase so a slow server cannot stall indefinitely.
 	// Mirrors the handshake deadline in ProdDialer.Dial.

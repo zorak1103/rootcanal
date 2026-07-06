@@ -44,7 +44,18 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Reg
 
 	srv.AddReceivingMiddleware(fieldSuggestionMiddleware())
 
-	// Session tools
+	registerSessionTools(srv, mgr)
+	registerSFTPTools(srv, ops)
+	registerRunOnceTools(srv, mgr, reg)
+	registerDiscoveryTools(srv, cfg)
+	registerHostKeyTool(srv, cfg, hk)
+	registerSkillTools(srv)
+
+	return srv
+}
+
+// registerSessionTools registers the four persistent-shell-session tools.
+func registerSessionTools(srv *mcp.Server, mgr session.Manager) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ssh_session_open",
 		Description: "Open a persistent interactive shell session on a pre-declared host. Returns a session_id for use with ssh_session_send and ssh_session_close.",
@@ -64,8 +75,10 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Reg
 		Name:        "ssh_session_list",
 		Description: "List all currently open shell sessions with their host and timing metadata.",
 	}, handleSessionList(mgr))
+}
 
-	// SFTP tools
+// registerSFTPTools registers the three SFTP file-operation tools.
+func registerSFTPTools(srv *mcp.Server, ops sftpops.Ops) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "sftp_read",
 		Description: "Read a file from a remote host via SFTP. Returns UTF-8 text; binary files are base64-encoded with binary=true in the output.",
@@ -80,57 +93,67 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Reg
 		Name:        "sftp_list",
 		Description: "List the contents of a directory on a remote host via SFTP.",
 	}, handleSFTPList(ops))
+}
 
-	// Run-once tool (always registered)
+// registerRunOnceTools registers the always-on ssh_run_once tool, plus the
+// ssh_job_status/ssh_job_cancel tools when reg is provided (detach mode).
+func registerRunOnceTools(srv *mcp.Server, mgr session.Manager, reg *jobs.Registry) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ssh_run_once",
 		Description: "Execute a single command on a pre-declared host via SSH exec channel (no PTY). Returns stdout, stderr, and exit_code. Use detach=true to run in background and get a job_id. Use this for one-shot reads (df, ls, docker inspect, cat) instead of open/send/close. Requires a POSIX-compatible remote shell.",
 	}, handleRunOnce(mgr, reg))
 
-	// Job tools (available when reg is provided)
-	if reg != nil {
-		mcp.AddTool(srv, &mcp.Tool{
-			Name:        "ssh_job_status",
-			Description: "Poll the status and output tail of a detached job started with ssh_run_once(detach=true). Returns running state, elapsed time, exit code, and stdout/stderr tails.",
-		}, handleJobStatus(reg))
-
-		mcp.AddTool(srv, &mcp.Tool{
-			Name:        "ssh_job_cancel",
-			Description: "Cancel a running detached job by job_id. Sends SIGTERM to the remote process.",
-		}, handleJobCancel(reg))
+	if reg == nil {
+		return
 	}
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "ssh_job_status",
+		Description: "Poll the status and output tail of a detached job started with ssh_run_once(detach=true). Returns running state, elapsed time, exit code, and stdout/stderr tails.",
+	}, handleJobStatus(reg))
 
-	// Discovery tools (available when cfg is provided)
-	if cfg != nil {
-		mcp.AddTool(srv, &mcp.Tool{
-			Name:        "ssh_list_hosts",
-			Description: "List all pre-declared SSH hosts with their non-sensitive metadata (name, address, user, auth type, SFTP status). Credentials and key paths are never included.",
-		}, handleListHosts(cfg))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "ssh_job_cancel",
+		Description: "Cancel a running detached job by job_id. Sends SIGTERM to the remote process.",
+	}, handleJobCancel(reg))
+}
 
-		mcp.AddTool(srv, &mcp.Tool{
-			Name:        "ssh_host_capabilities",
-			Description: "Return what rootcanal can do on a specific host: SSH, SFTP, allowed SFTP path prefixes, session idle timeout, and terminal/output settings.",
-		}, handleHostCapabilities(cfg))
+// registerDiscoveryTools registers ssh_list_hosts and ssh_host_capabilities
+// when cfg is provided.
+func registerDiscoveryTools(srv *mcp.Server, cfg *config.Config) {
+	if cfg == nil {
+		return
 	}
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "ssh_list_hosts",
+		Description: "List all pre-declared SSH hosts with their non-sensitive metadata (name, address, user, auth type, SFTP status). Credentials and key paths are never included.",
+	}, handleListHosts(cfg))
 
-	// Host-key refresh tool (requires both cfg and hk)
-	if cfg != nil && hk != nil {
-		mcp.AddTool(srv, &mcp.Tool{
-			Name: "ssh_accept_host_key",
-			Description: "Inspect or re-trust a changed SSH host key after a server rebuild. " +
-				"Call without confirm to preview the current and new key fingerprints. " +
-				"Call with confirm=true and expected_fingerprint=<new_fingerprint> to rewrite " +
-				"the known_hosts entry. Requires allow_known_hosts_update: true on the host. " +
-				"Only use after a human has confirmed the server was legitimately rebuilt.",
-		}, handleAcceptHostKey(hk))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "ssh_host_capabilities",
+		Description: "Return what rootcanal can do on a specific host: SSH, SFTP, allowed SFTP path prefixes, session idle timeout, and terminal/output settings.",
+	}, handleHostCapabilities(cfg))
+}
+
+// registerHostKeyTool registers ssh_accept_host_key when both cfg and hk are provided.
+func registerHostKeyTool(srv *mcp.Server, cfg *config.Config, hk hostkeys.Refresher) {
+	if cfg == nil || hk == nil {
+		return
 	}
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "ssh_accept_host_key",
+		Description: "Inspect or re-trust a changed SSH host key after a server rebuild. " +
+			"Call without confirm to preview the current and new key fingerprints. " +
+			"Call with confirm=true and expected_fingerprint=<new_fingerprint> to rewrite " +
+			"the known_hosts entry. Requires allow_known_hosts_update: true on the host. " +
+			"Only use after a human has confirmed the server was legitimately rebuilt.",
+	}, handleAcceptHostKey(hk))
+}
 
-	// Skill resources and tool (always registered)
+// registerSkillTools registers the always-on get_skill tool and skill:// resources.
+func registerSkillTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_skill",
 		Description: "Access embedded skill guidance docs. Use action=list to see available skills, action=read with skill=<slug> to fetch a specific doc. Prefer reading skill:// resources directly if your client supports them.",
 	}, handleGetSkill())
 	registerSkillResources(srv)
-
-	return srv
 }

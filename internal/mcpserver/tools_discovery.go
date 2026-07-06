@@ -29,7 +29,8 @@ type listHostsOut struct {
 func handleListHosts(cfg *config.Config) func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, listHostsOut, error) {
 	return func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listHostsOut, error) {
 		entries := make([]hostEntry, 0, len(cfg.Hosts))
-		for name, h := range cfg.Hosts {
+		for name := range cfg.Hosts {
+			h := cfg.Hosts[name]
 			prefixes := h.SFTPAllowedPrefixes
 			if prefixes == nil {
 				prefixes = []string{}
