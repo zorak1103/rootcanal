@@ -11,12 +11,24 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/jobs"
-	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
-	"gitlab.com/zorak1103/rootcanal/internal/session"
-	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/hostkeys"
+	"github.com/zorak1103/rootcanal/internal/jobs"
+	"github.com/zorak1103/rootcanal/internal/mcpserver"
+	"github.com/zorak1103/rootcanal/internal/session"
+	"github.com/zorak1103/rootcanal/internal/sftpops"
 )
+
+// noopRefresher is a minimal hostkeys.Refresher used only to verify that
+// ssh_accept_host_key registers when both cfg and hk are non-nil.
+type noopRefresher struct{}
+
+func (noopRefresher) Inspect(context.Context, string) (hostkeys.InspectResult, error) {
+	return hostkeys.InspectResult{}, nil
+}
+func (noopRefresher) Accept(context.Context, string, string) (hostkeys.AcceptResult, error) {
+	return hostkeys.AcceptResult{}, nil
+}
 
 // ---- fake Manager ----
 
@@ -74,8 +86,12 @@ func (f *fakeOps) List(ctx context.Context, host, path string) ([]sftpops.Entry,
 // ---- test helpers ----
 
 func newTestClient(t *testing.T, mgr session.Manager, ops sftpops.Ops, cfg *config.Config) *mcp.ClientSession {
+	return newTestClientFull(t, mgr, ops, cfg, nil, nil)
+}
+
+func newTestClientFull(t *testing.T, mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Registry, hk hostkeys.Refresher) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, ops, cfg, nil, nil, nil)
+	srv := mcpserver.New(mgr, ops, cfg, reg, hk, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,6 +165,27 @@ func TestToolsList_NoCfg(t *testing.T) {
 	}
 	if !names["ssh_run_once"] {
 		t.Error("ssh_run_once should be registered even without cfg")
+	}
+}
+
+func TestToolsList_WithHostKeyRefresher(t *testing.T) {
+	// ssh_accept_host_key registers only when both cfg and hk are provided.
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	cfg := &config.Config{Hosts: map[string]config.Host{"h": {}}}
+	sess := newTestClientFull(t, mgr, nil, cfg, nil, noopRefresher{})
+
+	result, err := sess.ListTools(context.Background(), &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	found := false
+	for _, tool := range result.Tools {
+		if tool.Name == "ssh_accept_host_key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ssh_accept_host_key should be registered when both cfg and hk are provided")
 	}
 }
 
@@ -907,6 +944,47 @@ func TestTool_JobStatus_Running(t *testing.T) {
 	}
 	if !out.Running {
 		t.Error("expected running=true for registered job")
+	}
+}
+
+func TestTool_JobStatus_Finished(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	reg := jobs.NewRegistry(10, time.Minute)
+	t.Cleanup(reg.Close)
+
+	jobID, err := reg.TryRegister("myhost", "echo hi", 0)
+	if err != nil {
+		t.Fatalf("TryRegister: %v", err)
+	}
+	code := 0
+	reg.MarkDone(jobID, &code)
+
+	sess := newTestClientWithReg(t, mgr, reg)
+
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ssh_job_status",
+		Arguments: map[string]any{"job_id": jobID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+
+	var out struct {
+		Running  bool `json:"running"`
+		ExitCode *int `json:"exit_code"`
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out.Running {
+		t.Error("expected running=false for finished job")
+	}
+	if out.ExitCode == nil || *out.ExitCode != 0 {
+		t.Errorf("expected exit_code=0, got %v", out.ExitCode)
 	}
 }
 

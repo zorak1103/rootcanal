@@ -12,9 +12,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
-	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/hostpool"
+	"github.com/zorak1103/rootcanal/internal/sshconn"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -27,6 +27,7 @@ type fakeSession struct {
 	closeOnce sync.Once
 	shellErr  error
 	ptyErr    error
+	stdinErr  error
 }
 
 func newFakeSession() *fakeSession {
@@ -39,6 +40,9 @@ func newFakeSession() *fakeSession {
 func (f *fakeSession) setOutput(w io.Writer) { f.outWriter = w }
 
 func (f *fakeSession) StdinPipe() (io.WriteCloser, error) {
+	if f.stdinErr != nil {
+		return nil, f.stdinErr
+	}
 	return &fakeStdin{ch: f.stdinCh}, nil
 }
 
@@ -183,6 +187,28 @@ func TestRingBuf_Overflow(t *testing.T) {
 	}
 }
 
+func TestRingBuf_Write_NotifyChannelFull(t *testing.T) {
+	rb := newRingBuf(64)
+	// First write fills the 1-buffered notify channel.
+	rb.Write([]byte("a"))
+	// Second write, before anything drains notify, must hit the non-blocking
+	// select's default branch instead of blocking on a full channel.
+	done := make(chan struct{})
+	go func() {
+		rb.Write([]byte("b"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Write blocked on a full notify channel")
+	}
+	got, _ := rb.Drain()
+	if string(got) != "ab" {
+		t.Errorf("Drain() = %q, want %q", got, "ab")
+	}
+}
+
 func TestRingBuf_EmptyDrain(t *testing.T) {
 	rb := newRingBuf(64)
 	got, trunc := rb.Drain()
@@ -252,6 +278,28 @@ func TestManager_Open_PTYError(t *testing.T) {
 	_, err := m.Open(context.Background(), "h", "")
 	if err == nil {
 		t.Fatal("expected PTY error")
+	}
+}
+
+func TestManager_Open_StdinPipeError(t *testing.T) {
+	fs := newFakeSession()
+	fs.stdinErr = errors.New("no stdin available")
+	m := newManager(minCfg(), fakeSessions(fs), nil)
+	defer m.Shutdown(context.Background())
+	_, err := m.Open(context.Background(), "h", "")
+	if err == nil {
+		t.Fatal("expected stdin pipe error")
+	}
+}
+
+func TestManager_Open_ShellError(t *testing.T) {
+	fs := newFakeSession()
+	fs.shellErr = errors.New("shell request rejected")
+	m := newManager(minCfg(), fakeSessions(fs), nil)
+	defer m.Shutdown(context.Background())
+	_, err := m.Open(context.Background(), "h", "")
+	if err == nil {
+		t.Fatal("expected shell error")
 	}
 }
 
@@ -473,6 +521,8 @@ func TestNewMarkerNonce_Format(t *testing.T) {
 		t.Errorf("len(newMarkerNonce()) = %d, want 8", len(nonce))
 	}
 	for _, c := range nonce {
+		//nolint:staticcheck // De Morgan form reads as "not(letter) and not(digit)"; this
+		// "not in the base32 alphabet" phrasing is clearer for what the check means.
 		if !((c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')) {
 			t.Errorf("newMarkerNonce() contains non-base32 char %q in %q", c, nonce)
 		}
@@ -577,6 +627,25 @@ func TestRingBuf_ZeroCapacity(t *testing.T) {
 }
 
 // ---- ringBuf WaitForData quiescence reset ----
+
+func TestRingBuf_WaitForData_DeadlineDuringQuiesce(t *testing.T) {
+	rb := newRingBuf(64)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		rb.Write([]byte("x")) // unblocks phase 1, entering the phase-2 quiesce wait
+	}()
+	start := time.Now()
+	// quiesce (200ms) is much longer than maxWait (50ms), so the overall
+	// deadline must fire from inside the phase-2 select loop, not phase 1.
+	rb.WaitForData(context.Background(), 200*time.Millisecond, 50*time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("WaitForData took too long: %v", elapsed)
+	}
+	got, _ := rb.Drain()
+	if !bytes.Contains(got, []byte("x")) {
+		t.Errorf("expected 'x' in output, got %q", got)
+	}
+}
 
 func TestRingBuf_WaitForData_QuiesceReset(t *testing.T) {
 	rb := newRingBuf(256)
@@ -1055,7 +1124,7 @@ func TestManager_Send_SessionClosedDuringWait(t *testing.T) {
 	s.closedReason = "lost"
 	s.mu.Unlock()
 	// Closing the fake SSH session makes its Wait() return, closing s.done.
-	gated.fakeSession.Close()
+	gated.Close()
 	close(gate)
 
 	res := <-sendDone
@@ -1131,7 +1200,7 @@ type fakeSessionWithWaitErr struct {
 }
 
 func (f *fakeSessionWithWaitErr) Wait() error {
-	<-f.fakeSession.closeCh
+	<-f.closeCh
 	return f.waitErr
 }
 

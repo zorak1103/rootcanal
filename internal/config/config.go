@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/fileperms"
+	"github.com/zorak1103/rootcanal/internal/fileperms"
 	"gopkg.in/yaml.v3"
 )
 
@@ -108,6 +108,13 @@ type Auth struct {
 	PasswordEnv   string `yaml:"password_env,omitempty"`
 }
 
+// Recognized values for Auth.Type.
+const (
+	AuthTypeKey      = "key"
+	AuthTypeAgent    = "agent"
+	AuthTypePassword = "password"
+)
+
 // Load reads, interpolates, and validates a config file.
 func Load(path string) (*Config, error) {
 	if err := fileperms.Check(path); err != nil {
@@ -141,7 +148,19 @@ func Load(path string) (*Config, error) {
 }
 
 func applyDefaults(cfg *Config) {
-	l := &cfg.Limits
+	applyLimitDefaults(&cfg.Limits)
+	applyHostDefaults(cfg)
+}
+
+// applyLimitDefaults fills in zero-valued Limits fields with their defaults.
+func applyLimitDefaults(l *Limits) {
+	applySessionLimitDefaults(l)
+	applySFTPAndTermDefaults(l)
+	applyRunOnceLimitDefaults(l)
+}
+
+// applySessionLimitDefaults fills in zero-valued session/connection Limits fields.
+func applySessionLimitDefaults(l *Limits) {
 	if l.MaxSessionsTotal == 0 {
 		l.MaxSessionsTotal = defaultMaxSessionsTotal
 	}
@@ -166,6 +185,10 @@ func applyDefaults(cfg *Config) {
 	if l.MaxSendTimeoutMs == 0 {
 		l.MaxSendTimeoutMs = defaultMaxSendTimeoutMs
 	}
+}
+
+// applySFTPAndTermDefaults fills in zero-valued SFTP and terminal Limits fields.
+func applySFTPAndTermDefaults(l *Limits) {
 	if l.SFTPMaxReadBytes == 0 {
 		l.SFTPMaxReadBytes = defaultSFTPMaxReadBytes
 	}
@@ -179,6 +202,10 @@ func applyDefaults(cfg *Config) {
 		t := true
 		l.DefaultCleanOutput = &t
 	}
+}
+
+// applyRunOnceLimitDefaults fills in zero-valued run-once/job/keepalive Limits fields.
+func applyRunOnceLimitDefaults(l *Limits) {
 	if l.RunOnceMaxBytes == 0 {
 		l.RunOnceMaxBytes = defaultRunOnceMaxBytes
 	}
@@ -203,8 +230,13 @@ func applyDefaults(cfg *Config) {
 	if l.DetachMaxDurationMs == 0 {
 		l.DetachMaxDurationMs = defaultDetachMaxDurationMs
 	}
+}
 
-	for name, h := range cfg.Hosts {
+// applyHostDefaults fills in zero-valued per-host fields that inherit from
+// the (already-defaulted) global Limits.
+func applyHostDefaults(cfg *Config) {
+	for name := range cfg.Hosts {
+		h := cfg.Hosts[name]
 		if h.IdleTimeout == 0 {
 			h.IdleTimeout = cfg.Limits.DefaultIdleTimeout
 		}

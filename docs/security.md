@@ -135,4 +135,4 @@ PuTTY/Pageant use a different protocol and are not supported. Support would requ
 
 ## Reporting security issues
 
-Please report vulnerabilities to the repository owner privately via GitLab's confidential issue feature, or by email. Do not open a public issue for security bugs.
+Please report vulnerabilities to the repository owner privately via [GitHub's private security advisories](https://github.com/zorak1103/rootcanal/security/advisories/new), or by email. Do not open a public issue for security bugs.

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
+	"github.com/zorak1103/rootcanal/internal/sftpops"
 )
 
 // ---- sftp_read ----

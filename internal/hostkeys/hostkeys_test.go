@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -26,6 +27,16 @@ type fakeScanner struct {
 
 func (f *fakeScanner) ScanHostKey(_ context.Context, _ config.Host, _ config.Limits) (ssh.PublicKey, error) {
 	return f.key, f.err
+}
+
+func TestProbeKey_TypeAndVerify(t *testing.T) {
+	var k probeKey
+	if got := k.Type(); got != "ecdsa-sha2-nistp256" {
+		t.Errorf("Type() = %q, want ecdsa-sha2-nistp256", got)
+	}
+	if err := k.Verify(nil, nil); err == nil {
+		t.Error("Verify() should always return an error — probeKey exists only to trigger knownhosts.KeyError")
+	}
 }
 
 // --- helpers ---
@@ -43,10 +54,18 @@ func newTestKey(t *testing.T) ssh.PublicKey {
 	return pub
 }
 
-func writeKnownHosts(t *testing.T, dir, hostport string, key ssh.PublicKey) string {
+// testHostport is the address used consistently across this file's fake
+// hosts, known_hosts entries, and probes.
+const testHostport = "127.0.0.1:2222"
+
+// testHostName is the config.Config host key used consistently across this
+// file's fake configs.
+const testHostName = "web1"
+
+func writeKnownHosts(t *testing.T, dir string, key ssh.PublicKey) string {
 	t.Helper()
 	path := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize(hostport)}, key)
+	line := knownhosts.Line([]string{knownhosts.Normalize(testHostport)}, key)
 	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +74,7 @@ func writeKnownHosts(t *testing.T, dir, hostport string, key ssh.PublicKey) stri
 
 func fakeHost(khPath string, allow bool) config.Host {
 	return config.Host{
-		Address:               "127.0.0.1:2222",
+		Address:               testHostport,
 		User:                  "u",
 		Auth:                  config.Auth{Type: "agent"},
 		KnownHosts:            khPath,
@@ -63,10 +82,10 @@ func fakeHost(khPath string, allow bool) config.Host {
 	}
 }
 
-func makeCfg(hostName string, h config.Host) *config.Config {
+func makeCfg(h config.Host) *config.Config {
 	return &config.Config{
 		Limits: config.Limits{DialTimeout: time.Second},
-		Hosts:  map[string]config.Host{hostName: h},
+		Hosts:  map[string]config.Host{testHostName: h},
 	}
 }
 
@@ -76,9 +95,9 @@ func TestInspect_Changed(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t)
 	liveKey := newTestKey(t)
-	khPath := writeKnownHosts(t, dir, "127.0.0.1:2222", storedKey)
+	khPath := writeKnownHosts(t, dir, storedKey)
 
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: liveKey})
 
 	res, err := r.Inspect(context.Background(), "web1")
@@ -102,9 +121,9 @@ func TestInspect_Changed(t *testing.T) {
 func TestInspect_NotChanged(t *testing.T) {
 	dir := t.TempDir()
 	key := newTestKey(t)
-	khPath := writeKnownHosts(t, dir, "127.0.0.1:2222", key)
+	khPath := writeKnownHosts(t, dir, key)
 
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: key})
 
 	res, err := r.Inspect(context.Background(), "web1")
@@ -118,8 +137,8 @@ func TestInspect_NotChanged(t *testing.T) {
 
 func TestInspect_NotPermitted(t *testing.T) {
 	dir := t.TempDir()
-	khPath := writeKnownHosts(t, dir, "127.0.0.1:2222", newTestKey(t))
-	cfg := makeCfg("web1", fakeHost(khPath, false /* allow=false */))
+	khPath := writeKnownHosts(t, dir, newTestKey(t))
+	cfg := makeCfg(fakeHost(khPath, false /* allow=false */))
 	r := New(cfg, &fakeScanner{key: newTestKey(t)})
 
 	_, err := r.Inspect(context.Background(), "web1")
@@ -144,7 +163,7 @@ func TestInspect_NoStoredKeyOfType(t *testing.T) {
 		t.Fatal(err)
 	}
 	liveKey := newTestKey(t)
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: liveKey})
 
 	res, err := r.Inspect(context.Background(), "web1")
@@ -165,9 +184,9 @@ func TestAccept_WritesNewEntry(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t)
 	liveKey := newTestKey(t)
-	khPath := writeKnownHosts(t, dir, "127.0.0.1:2222", storedKey)
+	khPath := writeKnownHosts(t, dir, storedKey)
 
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: liveKey})
 
 	res, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(liveKey))
@@ -188,8 +207,8 @@ func TestAccept_WritesNewEntry(t *testing.T) {
 func TestAccept_AlreadyCurrent(t *testing.T) {
 	dir := t.TempDir()
 	key := newTestKey(t)
-	khPath := writeKnownHosts(t, dir, "127.0.0.1:2222", key)
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	khPath := writeKnownHosts(t, dir, key)
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: key})
 
 	res, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(key))
@@ -201,10 +220,31 @@ func TestAccept_AlreadyCurrent(t *testing.T) {
 	}
 }
 
+func TestAccept_UnknownHost(t *testing.T) {
+	cfg := &config.Config{Hosts: map[string]config.Host{}}
+	r := New(cfg, &fakeScanner{key: newTestKey(t)})
+	_, err := r.Accept(context.Background(), "nohost", "fp")
+	if err == nil {
+		t.Fatal("expected error for unknown host")
+	}
+}
+
+func TestAccept_ScanError(t *testing.T) {
+	dir := t.TempDir()
+	khPath := writeKnownHosts(t, dir, newTestKey(t))
+	cfg := makeCfg(fakeHost(khPath, true))
+	r := New(cfg, &fakeScanner{err: errors.New("scan failed")})
+
+	_, err := r.Accept(context.Background(), "web1", "fp")
+	if err == nil {
+		t.Fatal("expected error when the scanner fails")
+	}
+}
+
 func TestAccept_MissingExpectedFingerprint(t *testing.T) {
 	dir := t.TempDir()
-	khPath := writeKnownHosts(t, dir, "127.0.0.1:2222", newTestKey(t))
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	khPath := writeKnownHosts(t, dir, newTestKey(t))
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: newTestKey(t)})
 
 	_, err := r.Accept(context.Background(), "web1", "")
@@ -217,8 +257,8 @@ func TestAccept_FingerprintMismatch(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t)
 	liveKey := newTestKey(t)
-	khPath := writeKnownHosts(t, dir, "127.0.0.1:2222", storedKey)
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	khPath := writeKnownHosts(t, dir, storedKey)
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: liveKey})
 
 	_, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(storedKey))
@@ -237,7 +277,7 @@ func TestAccept_OtherHostsPreserved(t *testing.T) {
 	khPath := filepath.Join(dir, "known_hosts")
 	_ = os.WriteFile(khPath, []byte(line1+"\n"+line2+"\n"), 0600)
 
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: liveKey})
 
 	_, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(liveKey))
@@ -256,7 +296,7 @@ func TestAccept_AppendsWhenNoStoredEntry(t *testing.T) {
 	khPath := filepath.Join(dir, "known_hosts")
 	_ = os.WriteFile(khPath, []byte(""), 0600)
 	liveKey := newTestKey(t)
-	cfg := makeCfg("web1", fakeHost(khPath, true))
+	cfg := makeCfg(fakeHost(khPath, true))
 	r := New(cfg, &fakeScanner{key: liveKey})
 
 	res, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(liveKey))

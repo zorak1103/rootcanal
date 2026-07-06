@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Mirrors CI lint job: go vet + staticcheck on the whole module.
+# Mirrors CI lint job: golangci-lint on the whole module.
+# Run `task lint:install` once to install golangci-lint locally.
 # Bypass with: git push --no-verify
 set -e
 
-echo "→ go vet ./..."
-go vet ./...
+if ! command -v golangci-lint >/dev/null 2>&1; then
+  echo "golangci-lint not found. Run: task lint:install"
+  exit 1
+fi
 
-echo "→ staticcheck ./..."
-go tool staticcheck ./...
+echo "→ golangci-lint run --timeout=5m ./..."
+golangci-lint run --timeout=5m ./...

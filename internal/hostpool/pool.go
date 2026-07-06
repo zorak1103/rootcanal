@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/sshconn"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/singleflight"
 )
@@ -44,10 +44,10 @@ func New(cfg *config.Config, d sshconn.Dialer) *Pool {
 	}
 }
 
-func (p *Pool) effectiveKeepalive(hostName string) (time.Duration, int) {
+func (p *Pool) effectiveKeepalive(hostName string) (interval time.Duration, maxFails int) {
 	h := p.cfg.Hosts[hostName]
-	interval := p.cfg.Limits.DefaultKeepaliveInterval
-	maxFails := p.cfg.Limits.DefaultKeepaliveMaxFailures
+	interval = p.cfg.Limits.DefaultKeepaliveInterval
+	maxFails = p.cfg.Limits.DefaultKeepaliveMaxFailures
 	if h.KeepaliveInterval != nil {
 		interval = *h.KeepaliveInterval
 	}
@@ -66,7 +66,7 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 	}
 
 	p.mu.Lock()
-	if e, ok := p.entries[hostName]; ok {
+	if e, exists := p.entries[hostName]; exists {
 		if p.cfg.Limits.MaxSessionsPerHost > 0 && e.refs >= p.cfg.Limits.MaxSessionsPerHost {
 			p.mu.Unlock()
 			return nil, nil, fmt.Errorf("host %q: per-host session limit of %d reached", hostName, p.cfg.Limits.MaxSessionsPerHost)
@@ -94,7 +94,7 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 		p.mu.Lock()
 		// Defensive: if a racing singleflight call already stored an entry
 		// (possible after a previous Do completed for the same key), prefer it.
-		if existing, ok := p.entries[hostName]; ok {
+		if existing, found := p.entries[hostName]; found {
 			p.mu.Unlock()
 			_ = client.Close()
 			return existing.client, nil
@@ -105,7 +105,7 @@ func (p *Pool) Get(ctx context.Context, hostName string) (*ssh.Client, func(), e
 		// fully initialized before any goroutine can reference it.
 		evict := func() {
 			p.mu.Lock()
-			if cur, ok := p.entries[hostName]; ok && cur == e {
+			if cur, exists := p.entries[hostName]; exists && cur == e {
 				if cur.idleTimer != nil {
 					cur.idleTimer.Stop()
 				}
@@ -196,7 +196,7 @@ func sanitizeConnErr(err error) error {
 		return errors.New("connection timed out")
 	}
 	if netErr.Err != nil {
-		return fmt.Errorf("network error: %v", netErr.Err)
+		return fmt.Errorf("network error: %w", netErr.Err)
 	}
 	return errors.New("network error")
 }

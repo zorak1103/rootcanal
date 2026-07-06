@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/sshconn"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -100,6 +100,29 @@ func minCfg(hosts map[string]config.Host) *config.Config {
 }
 
 // ---- error paths (no real SSH) ----
+
+func TestPool_EffectiveKeepalive(t *testing.T) {
+	customInterval := 5 * time.Second
+	customMaxFails := 2
+	cfg := &config.Config{
+		Limits: config.Limits{
+			DefaultKeepaliveInterval:    30 * time.Second,
+			DefaultKeepaliveMaxFailures: 3,
+		},
+		Hosts: map[string]config.Host{
+			"default": {},
+			"custom":  {KeepaliveInterval: &customInterval, KeepaliveMaxFailures: &customMaxFails},
+		},
+	}
+	p := New(cfg, &fakeDialer{})
+
+	if interval, maxFails := p.effectiveKeepalive("default"); interval != 30*time.Second || maxFails != 3 {
+		t.Errorf("default host: got (%v, %d), want (%v, %d)", interval, maxFails, 30*time.Second, 3)
+	}
+	if interval, maxFails := p.effectiveKeepalive("custom"); interval != customInterval || maxFails != customMaxFails {
+		t.Errorf("custom host: got (%v, %d), want (%v, %d)", interval, maxFails, customInterval, customMaxFails)
+	}
+}
 
 func TestPool_UnknownHost(t *testing.T) {
 	p := New(minCfg(nil), &fakeDialer{})
@@ -352,7 +375,7 @@ func TestPool_LostRace_PrefersExistingEntry(t *testing.T) {
 func TestSanitizeConnErr_NonNetError(t *testing.T) {
 	orig := errors.New("ssh: handshake failed: auth error")
 	got := sanitizeConnErr(orig)
-	if got != orig {
+	if got != orig { //nolint:errorlint // identity check: verifies pass-through, not equivalence
 		t.Errorf("expected non-net error to pass through unchanged")
 	}
 }
@@ -362,6 +385,16 @@ func TestSanitizeConnErr_Timeout(t *testing.T) {
 	got := sanitizeConnErr(inner)
 	if got.Error() != "connection timed out" {
 		t.Errorf("got %q, want %q", got.Error(), "connection timed out")
+	}
+}
+
+func TestSanitizeConnErr_NilInnerErr(t *testing.T) {
+	// An OpError with no wrapped Err (and thus not a timeout) falls through
+	// to the generic "network error" message.
+	inner := &net.OpError{Op: "dial", Net: "tcp"}
+	got := sanitizeConnErr(inner)
+	if got.Error() != "network error" {
+		t.Errorf("got %q, want %q", got.Error(), "network error")
 	}
 }
 
@@ -375,7 +408,7 @@ func TestSanitizeConnErr_ConnectionRefused(t *testing.T) {
 		t.Skip("127.0.0.1:1 unexpectedly accepted a connection")
 	}
 	got := sanitizeConnErr(err)
-	if got == err {
+	if got == err { //nolint:errorlint // identity check: verifies the error was replaced, not equivalence
 		t.Fatal("expected net.OpError to be replaced")
 	}
 	msg := got.Error()

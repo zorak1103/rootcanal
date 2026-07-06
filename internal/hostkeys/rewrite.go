@@ -72,7 +72,7 @@ func appendLine(path, newLine string) error {
 		return fmt.Errorf("reading %q: %w", path, err)
 	}
 	content := string(data)
-	if len(content) > 0 && content[len(content)-1] != '\n' {
+	if content != "" && content[len(content)-1] != '\n' {
 		content += "\n"
 	}
 	content += newLine + "\n"
@@ -90,21 +90,21 @@ func atomicWrite(path, content string) error {
 	}
 	tmpPath := tmp.Name()
 	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp file: %w", err)
 	}
-	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("setting temp file permissions: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("closing temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("replacing %q: %w", path, err)
 	}
 	return nil

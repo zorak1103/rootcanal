@@ -12,16 +12,16 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/hostkeys"
-	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
-	"gitlab.com/zorak1103/rootcanal/internal/jobs"
-	"gitlab.com/zorak1103/rootcanal/internal/logging"
-	"gitlab.com/zorak1103/rootcanal/internal/mcpserver"
-	"gitlab.com/zorak1103/rootcanal/internal/session"
-	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
-	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
-	"gitlab.com/zorak1103/rootcanal/internal/version"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/hostkeys"
+	"github.com/zorak1103/rootcanal/internal/hostpool"
+	"github.com/zorak1103/rootcanal/internal/jobs"
+	"github.com/zorak1103/rootcanal/internal/logging"
+	"github.com/zorak1103/rootcanal/internal/mcpserver"
+	"github.com/zorak1103/rootcanal/internal/session"
+	"github.com/zorak1103/rootcanal/internal/sftpops"
+	"github.com/zorak1103/rootcanal/internal/sshconn"
+	"github.com/zorak1103/rootcanal/internal/version"
 )
 
 func main() {
@@ -48,21 +48,7 @@ func main() {
 	}
 
 	if *probeFlag != "" {
-		h, ok := cfg.Hosts[*probeFlag]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "probe: host %q not found in config\n", *probeFlag)
-			os.Exit(1)
-		}
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
-		client, err := sshconn.ProdDialer{}.Dial(ctx, h, cfg.Limits)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "probe %q failed: %v\n", *probeFlag, err)
-			os.Exit(1)
-		}
-		_ = client.Close()
-		fmt.Printf("OK: connected to %s as %s\n", h.Address, h.User)
-		return
+		os.Exit(runProbe(*probeFlag, cfg))
 	}
 
 	// MCP server mode.
@@ -106,6 +92,27 @@ func main() {
 		log.Error("shutdown error", "err", err)
 	}
 	pool.Close()
+}
+
+// runProbe dials the named host and reports success/failure, returning the
+// process exit code. Kept separate from main so its deferred cancel() always
+// runs — main calls os.Exit(runProbe(...)) from a frame with no live defers.
+func runProbe(name string, cfg *config.Config) int {
+	h, ok := cfg.Hosts[name]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "probe: host %q not found in config\n", name)
+		return 1
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	client, err := sshconn.ProdDialer{}.Dial(ctx, h, cfg.Limits)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "probe %q failed: %v\n", name, err)
+		return 1
+	}
+	_ = client.Close()
+	fmt.Printf("OK: connected to %s as %s\n", h.Address, h.User)
+	return 0
 }
 
 func defaultConfigPath() string {

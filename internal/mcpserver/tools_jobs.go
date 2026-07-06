@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/jobs"
+	"github.com/zorak1103/rootcanal/internal/jobs"
 )
 
 // ---- ssh_job_status ----

@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/session"
+	"github.com/zorak1103/rootcanal/internal/session"
 )
 
 // ---- ssh_session_open ----
@@ -129,7 +129,8 @@ func handleSessionList(mgr session.Manager) func(context.Context, *mcp.CallToolR
 	return func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, sessionListOut, error) {
 		infos := mgr.List()
 		summaries := make([]sessionSummary, len(infos))
-		for i, info := range infos {
+		for i := range infos {
+			info := &infos[i]
 			summaries[i] = sessionSummary{
 				SessionID:    info.ID,
 				Name:         info.Name,

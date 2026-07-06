@@ -5,10 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/config"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -106,75 +107,84 @@ func (m *manager) Detach(ctx context.Context, host string, in RunOnceInput, reg 
 
 	deadline := time.Duration(timeoutMs) * time.Millisecond
 
-	go func() {
-		defer release()
-		defer func() { _ = sess.Close() }()
-
-		// Wire cancel: when reg.Cancel(jobID) is called, send SIGTERM.
-		reg.SetCancel(jobID, func() {
-			_ = sess.Signal(ssh.SIGTERM)
-		})
-
-		// Stream stdout and stderr into the registry concurrently.
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 4096)
-			for {
-				n, err := stdoutPipe.Read(buf)
-				if n > 0 {
-					reg.AppendStdout(jobID, buf[:n])
-				}
-				if err != nil {
-					return
-				}
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 4096)
-			for {
-				n, err := stderrPipe.Read(buf)
-				if n > 0 {
-					reg.AppendStderr(jobID, buf[:n])
-				}
-				if err != nil {
-					return
-				}
-			}
-		}()
-
-		runCtx, cancel := context.WithTimeout(context.Background(), deadline)
-		defer cancel()
-
-		runDone := make(chan error, 1)
-		go func() { runDone <- sess.Wait() }()
-
-		var runErr error
-		select {
-		case runErr = <-runDone:
-		case <-runCtx.Done():
-			_ = sess.Signal(ssh.SIGTERM)
-			runErr = <-runDone
-		}
-
-		wg.Wait() // wait for stream goroutines to drain
-
-		var code *int
-		if runErr == nil {
-			c := 0
-			code = &c
-		} else {
-			var exitErr *ssh.ExitError
-			if errors.As(runErr, &exitErr) {
-				c := exitErr.ExitStatus()
-				code = &c
-			}
-			// signal exit → code stays nil
-		}
-		reg.MarkDone(jobID, code)
-	}()
+	// #nosec G118 — this goroutine must outlive the request context by design: it is the
+	// detached job itself, bounded instead by its own context.WithTimeout(context.Background(), deadline) below.
+	go m.streamDetached(sess, stdoutPipe, stderrPipe, jobID, deadline, reg, release)
 
 	return jobID, nil
+}
+
+// streamDetached is the background body of a detached job started by Detach:
+// it wires the cancel hook, streams stdout/stderr into the registry
+// concurrently, waits for the command to exit or the deadline to fire, and
+// marks the job done with its exit code (nil if terminated by signal).
+// Always releases sess and the pool reference on return.
+func (m *manager) streamDetached(sess *ssh.Session, stdoutPipe, stderrPipe io.Reader, jobID string, deadline time.Duration, reg DetachRegistry, release func()) {
+	defer release()
+	defer func() { _ = sess.Close() }()
+
+	// Wire cancel: when reg.Cancel(jobID) is called, send SIGTERM.
+	reg.SetCancel(jobID, func() {
+		_ = sess.Signal(ssh.SIGTERM)
+	})
+
+	// Stream stdout and stderr into the registry concurrently.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdoutPipe.Read(buf)
+			if n > 0 {
+				reg.AppendStdout(jobID, buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, err := stderrPipe.Read(buf)
+			if n > 0 {
+				reg.AppendStderr(jobID, buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	runCtx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- sess.Wait() }()
+
+	var runErr error
+	select {
+	case runErr = <-runDone:
+	case <-runCtx.Done():
+		_ = sess.Signal(ssh.SIGTERM)
+		runErr = <-runDone
+	}
+
+	wg.Wait() // wait for stream goroutines to drain
+
+	var code *int
+	if runErr == nil {
+		c := 0
+		code = &c
+	} else {
+		var exitErr *ssh.ExitError
+		if errors.As(runErr, &exitErr) {
+			c := exitErr.ExitStatus()
+			code = &c
+		}
+		// signal exit → code stays nil
+	}
+	reg.MarkDone(jobID, code)
 }

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/fileperms"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/fileperms"
 )
 
 // ---- MAN-002: HostKeyAlgorithms pinning ----
@@ -21,7 +21,7 @@ func TestHostKeyCallback_PinsAlgorithms(t *testing.T) {
 	addr, khPath := startTestSSHServer(t)
 
 	h := config.Host{KnownHosts: khPath}
-	_, algos, err := hostKeyCallback(h, addr)
+	_, algos, err := hostKeyCallback(&h, addr)
 	if err != nil {
 		t.Fatalf("hostKeyCallback() error: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestHostKeyCallback_NilAlgos_UnknownHost(t *testing.T) {
 	_, khPath := startTestSSHServer(t)
 
 	h := config.Host{KnownHosts: khPath}
-	_, algos, err := hostKeyCallback(h, "192.0.2.1:9999") // not in known_hosts
+	_, algos, err := hostKeyCallback(&h, "192.0.2.1:9999") // not in known_hosts
 	if err != nil {
 		t.Fatalf("hostKeyCallback() error for unknown host: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestBuildClientConfig_AlgorithmsPinned(t *testing.T) {
 		KnownHosts: khPath,
 		Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_SEC_PASS"},
 	}
-	cfg, err := BuildClientConfig(h)
+	cfg, err := BuildClientConfig(&h)
 	if err != nil {
 		t.Fatalf("BuildClientConfig(): %v", err)
 	}

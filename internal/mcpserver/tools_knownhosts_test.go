@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/hostkeys"
+	"github.com/zorak1103/rootcanal/internal/hostkeys"
 )
 
 // --- fakeRefresher ---
@@ -51,6 +51,29 @@ func TestHandleAcceptHostKey_Preview(t *testing.T) {
 	}
 	if out.Message == "" {
 		t.Error("want non-empty Message in preview result")
+	}
+}
+
+func TestHandleAcceptHostKey_Preview_NotChanged(t *testing.T) {
+	fr := &fakeRefresher{
+		inspectResult: hostkeys.InspectResult{
+			Host:       "web1",
+			CurrentFP:  "SHA256:SAME",
+			NewFP:      "SHA256:SAME",
+			Changed:    false,
+			KnownHosts: "/tmp/kh",
+		},
+	}
+	h := handleAcceptHostKey(fr)
+	_, out, err := h(context.Background(), &mcp.CallToolRequest{}, acceptHostKeyIn{Host: "web1"})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if out.Changed {
+		t.Error("want Changed=false")
+	}
+	if out.Message != "Host key matches the stored entry; no update is needed." {
+		t.Errorf("unexpected message for unchanged key: %q", out.Message)
 	}
 }
 

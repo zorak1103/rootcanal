@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // ---- classifyRunResult tests (Bug #15) ----
@@ -114,6 +116,16 @@ func TestExtractExitCode_HardIOError(t *testing.T) {
 	_, _, isExit := extractExitCode(fmt.Errorf("connection reset by peer"))
 	if isExit {
 		t.Error("expected isExitErr=false for non-ssh.ExitError")
+	}
+}
+
+func TestExtractExitCode_ExitError(t *testing.T) {
+	exitCode, signal, isExitErr := extractExitCode(&ssh.ExitError{})
+	if !isExitErr {
+		t.Error("expected isExitErr=true for *ssh.ExitError")
+	}
+	if exitCode != 0 || signal != "" {
+		t.Errorf("got (%d, %q), want (0, \"\") for a zero-value ExitError", exitCode, signal)
 	}
 }
 

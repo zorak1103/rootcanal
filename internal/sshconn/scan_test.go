@@ -5,7 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestScanHostKey_ReturnsServerKey(t *testing.T) {
@@ -13,7 +14,7 @@ func TestScanHostKey_ReturnsServerKey(t *testing.T) {
 	h := config.Host{Address: addr, User: "u", Auth: config.Auth{Type: "agent"}}
 	limits := config.Limits{DialTimeout: 2 * time.Second}
 
-	key, err := ScanHostKey(context.Background(), h, limits)
+	key, err := ScanHostKey(context.Background(), &h, limits)
 	if err != nil {
 		t.Fatalf("ScanHostKey: %v", err)
 	}
@@ -29,7 +30,7 @@ func TestScanHostKey_Unreachable(t *testing.T) {
 	h := config.Host{Address: "127.0.0.1:19999", User: "u", Auth: config.Auth{Type: "agent"}}
 	limits := config.Limits{DialTimeout: 300 * time.Millisecond}
 
-	_, err := ScanHostKey(context.Background(), h, limits)
+	_, err := ScanHostKey(context.Background(), &h, limits)
 	if err == nil {
 		t.Fatal("expected error for unreachable host")
 	}
@@ -45,5 +46,15 @@ func TestProdScanner_ImplementsScanner(t *testing.T) {
 	}
 	if key == nil {
 		t.Fatal("nil key")
+	}
+}
+
+func TestDummyKey_TypeAndVerify(t *testing.T) {
+	var k dummyKey
+	if got := k.Type(); got != ssh.KeyAlgoED25519 {
+		t.Errorf("Type() = %q, want %q", got, ssh.KeyAlgoED25519)
+	}
+	if err := k.Verify(nil, nil); err == nil {
+		t.Error("Verify() should always return an error — dummyKey exists only to trigger knownhosts.KeyError")
 	}
 }

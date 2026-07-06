@@ -64,6 +64,80 @@ func TestRewriteLine_Perms(t *testing.T) {
 	}
 }
 
+func TestFindStoredKeyLine_InvalidFile(t *testing.T) {
+	_, err := findStoredKeyLine(filepath.Join(t.TempDir(), "does-not-exist"), "host:22", "ssh-ed25519")
+	if err == nil {
+		t.Fatal("expected error for a known_hosts path that cannot be loaded")
+	}
+}
+
+func TestFindStoredKeyLine_NoMatchingType(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t) // ecdsa-sha2-nistp256
+	khPath := filepath.Join(dir, "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize("host:22")}, storedKey)
+	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
+
+	// An entry exists for this host, but of a different key type — the caller
+	// should be told to append rather than rewrite (line == 0).
+	lineNum, err := findStoredKeyLine(khPath, "host:22", "ssh-ed25519")
+	if err != nil {
+		t.Fatalf("findStoredKeyLine: %v", err)
+	}
+	if lineNum != 0 {
+		t.Errorf("expected 0 (no matching type), got %d", lineNum)
+	}
+}
+
+func TestStoredFingerprint_InvalidFile(t *testing.T) {
+	fp := storedFingerprint(filepath.Join(t.TempDir(), "missing"), "host:22", "ssh-ed25519")
+	if fp != "" {
+		t.Errorf("expected empty fingerprint for an unreadable known_hosts file, got %q", fp)
+	}
+}
+
+func TestRewriteLine_FileNotFound(t *testing.T) {
+	err := rewriteLine(filepath.Join(t.TempDir(), "missing"), 1, "line")
+	if err == nil {
+		t.Fatal("expected error for a nonexistent known_hosts file")
+	}
+}
+
+func TestRewriteLine_LineOutOfRange(t *testing.T) {
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "known_hosts")
+	_ = os.WriteFile(khPath, []byte("line1\n"), 0600)
+	if err := rewriteLine(khPath, 5, "line5"); err == nil {
+		t.Fatal("expected out-of-range error for a line number beyond the file's length")
+	}
+}
+
+func TestAppendLine_FileNotFound(t *testing.T) {
+	err := appendLine(filepath.Join(t.TempDir(), "missing"), "line")
+	if err == nil {
+		t.Fatal("expected error for a nonexistent known_hosts file")
+	}
+}
+
+func TestAtomicWrite_CreateTempFails_WhenDirMissing(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+	err := atomicWrite(filepath.Join(missingDir, "known_hosts"), "content")
+	if err == nil {
+		t.Fatal("expected error when the target directory does not exist")
+	}
+}
+
+func TestAtomicWrite_RenameFails_WhenTargetIsDir(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "known_hosts")
+	if err := os.Mkdir(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(target, "content"); err == nil {
+		t.Fatal("expected rename error when the target path is an existing directory")
+	}
+}
+
 func TestAppendLine_AddsEntry(t *testing.T) {
 	dir := t.TempDir()
 	key := newTestKey(t)

@@ -87,6 +87,21 @@ func TestStartKeepalive_OnDead_CalledOnMaxFailures(t *testing.T) {
 	}
 }
 
+func TestStartKeepalive_MaxFailuresZero_NeverCloses(t *testing.T) {
+	// maxFailures=0 means "never disconnect based on keepalive failures" —
+	// keepalives are still sent, but the client must stay open indefinitely.
+	fake := &fakeKeepaliveClient{sendErr: errors.New("connection reset")}
+	stop := startKeepalive(fake, 10*time.Millisecond, 0, nil, nil)
+	defer stop()
+	time.Sleep(100 * time.Millisecond)
+	if fake.closed.Load() {
+		t.Error("client should not be closed when maxFailures=0")
+	}
+	if fake.requestCount() == 0 {
+		t.Error("keepalive requests should still be sent when maxFailures=0")
+	}
+}
+
 func TestStartKeepalive_OnDead_NilIsSafe(t *testing.T) {
 	// nil onDead with max_failures must close the client without panicking.
 	fake := &fakeKeepaliveClient{sendErr: errors.New("connection reset")}

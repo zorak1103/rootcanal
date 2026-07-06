@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -199,6 +199,20 @@ func TestProdDialer_Dial(t *testing.T) {
 	_ = client.Close()
 }
 
+func TestProdDialer_Dial_BadAuthConfig(t *testing.T) {
+	// An invalid auth type makes BuildClientConfig fail before any network
+	// activity — exercises Dial's earliest error-return branch.
+	h := config.Host{
+		Address: "127.0.0.1:22",
+		User:    "u",
+		Auth:    config.Auth{Type: "kerberos"},
+	}
+	_, err := ProdDialer{}.Dial(context.Background(), h, config.Limits{})
+	if err == nil {
+		t.Fatal("expected error for invalid auth config")
+	}
+}
+
 func TestProdDialer_Dial_BadHost(t *testing.T) {
 	_, knownHostsPath := startTestSSHServer(t)
 	t.Setenv("TEST_RC_DIAL_PASS2", "x")
@@ -235,7 +249,7 @@ func TestBuildClientConfig_HostKeyMismatch(t *testing.T) {
 		KnownHosts: tmpKey,
 		Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_RC_CFG_PASS"},
 	}
-	cfg, err := BuildClientConfig(h)
+	cfg, err := BuildClientConfig(&h)
 	if err != nil {
 		t.Fatalf("BuildClientConfig() unexpected error: %v", err)
 	}
@@ -286,7 +300,7 @@ func TestBuildClientConfig_BadKnownHosts(t *testing.T) {
 		KnownHosts: "/nonexistent/known_hosts_file",
 		Auth:       config.Auth{Type: "password", PasswordEnv: "TEST_RC_CFG2_PASS"},
 	}
-	_, err := BuildClientConfig(h)
+	_, err := BuildClientConfig(&h)
 	if err == nil {
 		t.Fatal("expected error for missing known_hosts")
 	}
@@ -295,11 +309,11 @@ func TestBuildClientConfig_BadKnownHosts(t *testing.T) {
 func TestBuildAuthMethods_AgentBranch(t *testing.T) {
 	// Exercises the "agent" case in buildAuthMethods regardless of whether
 	// the agent is actually running.
-	_, _ = buildAuthMethods(config.Host{Auth: config.Auth{Type: "agent"}})
+	_, _ = buildAuthMethods(&config.Host{Auth: config.Auth{Type: "agent"}})
 }
 
 func TestBuildAuthMethods_UnknownType(t *testing.T) {
-	_, err := buildAuthMethods(config.Host{Auth: config.Auth{Type: "kerberos"}})
+	_, err := buildAuthMethods(&config.Host{Auth: config.Auth{Type: "kerberos"}})
 	if err == nil {
 		t.Fatal("expected error for unknown auth type")
 	}
@@ -371,7 +385,7 @@ func TestBuildClientConfig_KeyAuth(t *testing.T) {
 		KnownHosts: kh,
 		Auth:       config.Auth{Type: "key", KeyPath: keyPath},
 	}
-	cfg, err := BuildClientConfig(h)
+	cfg, err := BuildClientConfig(&h)
 	if err != nil {
 		t.Fatalf("BuildClientConfig(key) unexpected error: %v", err)
 	}

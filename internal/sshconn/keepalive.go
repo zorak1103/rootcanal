@@ -37,29 +37,38 @@ func startKeepalive(client keepaliveClient, interval time.Duration, maxFailures 
 			case <-stop:
 				return
 			case <-ticker.C:
-				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-				if err != nil {
-					consecutive++
-					if log != nil {
-						log.Debug("ssh keepalive failed", "consecutive", consecutive, "err", err)
-					}
-					if maxFailures > 0 && consecutive >= maxFailures {
-						if log != nil {
-							log.Warn("ssh keepalive: max failures reached, closing connection",
-								"failures", consecutive)
-						}
-						_ = client.Close()
-						if onDead != nil {
-							onDead()
-						}
-						return
-					}
-				} else {
-					consecutive = 0
+				if keepaliveTick(client, log, onDead, maxFailures, &consecutive) {
+					return
 				}
 			}
 		}
 	}()
 	var once sync.Once
 	return func() { once.Do(func() { close(stop) }) }
+}
+
+// keepaliveTick sends one keepalive request and updates *consecutive. It
+// returns true once maxFailures consecutive failures have been reached and
+// the connection has been closed — the caller's loop should then stop.
+func keepaliveTick(client keepaliveClient, log *slog.Logger, onDead func(), maxFailures int, consecutive *int) bool {
+	_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+	if err == nil {
+		*consecutive = 0
+		return false
+	}
+	*consecutive++
+	if log != nil {
+		log.Debug("ssh keepalive failed", "consecutive", *consecutive, "err", err)
+	}
+	if maxFailures <= 0 || *consecutive < maxFailures {
+		return false
+	}
+	if log != nil {
+		log.Warn("ssh keepalive: max failures reached, closing connection", "failures", *consecutive)
+	}
+	_ = client.Close()
+	if onDead != nil {
+		onDead()
+	}
+	return true
 }
