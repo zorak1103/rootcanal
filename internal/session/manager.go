@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/hostpool"
 	"golang.org/x/crypto/ssh"
 )
 

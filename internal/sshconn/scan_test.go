@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/config"
 )
 
 func TestScanHostKey_ReturnsServerKey(t *testing.T) {

@@ -12,9 +12,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/hostpool"
-	"gitlab.com/zorak1103/rootcanal/internal/sshconn"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/hostpool"
+	"github.com/zorak1103/rootcanal/internal/sshconn"
 	"golang.org/x/crypto/ssh"
 )
 

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/jobs"
+	"github.com/zorak1103/rootcanal/internal/jobs"
 )
 
 func TestRegistry_TryRegisterAndGet(t *testing.T) {

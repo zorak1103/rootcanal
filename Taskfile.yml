@@ -1,7 +1,7 @@
 version: '3'
 
 vars:
-  MODULE: gitlab.com/zorak1103/rootcanal
+  MODULE: github.com/zorak1103/rootcanal
   MIN_COVERAGE: "85.0"
   VERSION:
     sh: git describe --tags --always 2>/dev/null || echo dev
@@ -39,10 +39,15 @@ tasks:
       - go run ./tools/covercheck -min={{.MIN_COVERAGE}} coverage.out
 
   lint:
-    desc: Run go vet and staticcheck
+    desc: Run golangci-lint (CI installs it; locally run `task lint:install` first)
     cmds:
-      - go vet ./...
-      - go tool staticcheck ./...
+      - golangci-lint run --timeout=5m ./...
+
+  lint:install:
+    desc: Install golangci-lint locally (tracked by Renovate)
+    cmds:
+      # renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
+      - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
   tidy:
     desc: Run go mod tidy
@@ -55,7 +60,7 @@ tasks:
       - goreleaser release --snapshot --clean
 
   release:
-    desc: Publish a release to GitLab (run on a tagged commit; requires goreleaser + GITLAB_TOKEN)
+    desc: Publish a release to GitHub (run on a tagged commit; requires goreleaser + GITHUB_TOKEN)
     cmds:
       - goreleaser release --clean
 
@@ -79,7 +84,7 @@ tasks:
     cmds:
       - git config core.hooksPath .githooks
       - chmod +x .githooks/pre-commit .githooks/pre-push
-      - echo "Git hooks activated (pre-commit auto-fixes gofmt; pre-push runs vet + staticcheck). Bypass either with --no-verify."
+      - echo "Git hooks activated (pre-commit auto-fixes gofmt; pre-push runs golangci-lint). Bypass either with --no-verify."
 
   fmt:
     desc: Format all Go files (gofmt -s -w)

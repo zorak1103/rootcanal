@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/zorak1103/rootcanal/internal/logging"
+	"github.com/zorak1103/rootcanal/internal/logging"
 )
 
 func TestSwappable_InitialHandler(t *testing.T) {

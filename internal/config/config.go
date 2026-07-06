@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"gitlab.com/zorak1103/rootcanal/internal/fileperms"
+	"github.com/zorak1103/rootcanal/internal/fileperms"
 	"gopkg.in/yaml.v3"
 )
 

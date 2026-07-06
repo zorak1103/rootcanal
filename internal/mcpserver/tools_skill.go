@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/mcpserver/skills"
+	"github.com/zorak1103/rootcanal/internal/mcpserver/skills"
 )
 
 // ---- get_skill ----

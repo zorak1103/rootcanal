@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/mcpserver/skills"
+	"github.com/zorak1103/rootcanal/internal/mcpserver/skills"
 )
 
 // registerSkillResources adds one skill:// resource per entry in skills.Catalog.

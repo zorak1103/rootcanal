@@ -4,12 +4,12 @@ import (
 	"context"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/config"
-	"gitlab.com/zorak1103/rootcanal/internal/hostkeys"
-	"gitlab.com/zorak1103/rootcanal/internal/jobs"
-	"gitlab.com/zorak1103/rootcanal/internal/session"
-	"gitlab.com/zorak1103/rootcanal/internal/sftpops"
-	"gitlab.com/zorak1103/rootcanal/internal/version"
+	"github.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/hostkeys"
+	"github.com/zorak1103/rootcanal/internal/jobs"
+	"github.com/zorak1103/rootcanal/internal/session"
+	"github.com/zorak1103/rootcanal/internal/sftpops"
+	"github.com/zorak1103/rootcanal/internal/version"
 )
 
 // New builds a configured *mcp.Server with all session, SFTP, and skill tools

@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/hostkeys"
+	"github.com/zorak1103/rootcanal/internal/hostkeys"
 )
 
 type acceptHostKeyIn struct {

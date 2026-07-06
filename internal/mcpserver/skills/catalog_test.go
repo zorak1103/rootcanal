@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/zorak1103/rootcanal/internal/mcpserver/skills"
+	"github.com/zorak1103/rootcanal/internal/mcpserver/skills"
 )
 
 func TestCatalogSlugs(t *testing.T) {

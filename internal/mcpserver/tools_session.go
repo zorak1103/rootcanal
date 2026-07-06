@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/session"
+	"github.com/zorak1103/rootcanal/internal/session"
 )
 
 // ---- ssh_session_open ----

@@ -7,7 +7,7 @@ import (
 	"sort"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"gitlab.com/zorak1103/rootcanal/internal/config"
+	"github.com/zorak1103/rootcanal/internal/config"
 )
 
 // ---- ssh_list_hosts ----
