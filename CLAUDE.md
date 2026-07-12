@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 task build   # compile binary (outputs rootcanal / rootcanal.exe)
 task test    # run all tests
 task cover   # run tests + enforce ≥85% line coverage
-task lint    # go vet + staticcheck
+task lint    # golangci-lint v2 (requires `task lint:install` locally first)
 
 # Run a single test package or specific test
 go test ./internal/session/ -run TestManagerSend -v

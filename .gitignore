@@ -14,3 +14,5 @@ CLAUDE.local.md
 .remember/
 docs/superpowers/
 temp/
+# roborev snapshots
+/.roborev/

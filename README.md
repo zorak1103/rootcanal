@@ -259,7 +259,7 @@ If a password prompt appears and no password is provided, the session blocks unt
 task build    # compile binary
 task test     # run all tests
 task cover    # enforce ≥85% coverage
-task lint     # go vet + staticcheck
+task lint     # golangci-lint v2 (requires `task lint:install` locally first)
 task run      # run locally (pass args after --)
 ```
 
