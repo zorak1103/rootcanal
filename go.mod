@@ -6,7 +6,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/jimschubert/stripansi v0.0.1
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/pkg/sftp v1.13.10
+	github.com/pkg/sftp v1.13.11
 	github.com/testcontainers/testcontainers-go v0.43.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sync v0.22.0
