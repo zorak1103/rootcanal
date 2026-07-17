@@ -55,10 +55,12 @@ func handleAcceptHostKey(hk hostkeys.Refresher) func(context.Context, *mcp.CallT
 		var msg string
 		if res.Changed {
 			msg = fmt.Sprintf(
-				"Host key has changed. Verify with the server operator that %q was legitimately "+
-					"rebuilt, then call ssh_accept_host_key again with confirm=true and "+
-					"expected_fingerprint=%q.",
-				in.Host, res.NewFP)
+				"Host key has changed. Before proceeding, verify the new fingerprint %q for %q "+
+					"OUT-OF-BAND — e.g. against the hosting provider's console, a config-management "+
+					"record, or by contacting whoever rebuilt the host. This preview scan alone cannot "+
+					"rule out a man-in-the-middle. Once independently verified, call ssh_accept_host_key "+
+					"again with confirm=true and expected_fingerprint=%q.",
+				res.NewFP, in.Host, res.NewFP)
 		} else {
 			msg = "Host key matches the stored entry; no update is needed."
 		}

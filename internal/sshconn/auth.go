@@ -3,11 +3,10 @@ package sshconn
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/zorak1103/rootcanal/internal/config"
 	"github.com/zorak1103/rootcanal/internal/fileperms"
+	"github.com/zorak1103/rootcanal/internal/pathutil"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -62,13 +61,10 @@ func buildPasswordAuth(a config.Auth) ([]ssh.AuthMethod, error) {
 }
 
 // expandPath replaces a leading ~/ with the user's home directory.
+// Thin wrapper kept so existing tests can call expandPath directly; the
+// actual logic lives in internal/pathutil, shared with internal/config.
 func expandPath(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, p[2:])
-		}
-	}
-	return p
+	return pathutil.ExpandTilde(p)
 }
 
 // zero overwrites b with zeroes to limit the time sensitive bytes live in memory.

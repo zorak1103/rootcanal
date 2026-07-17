@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"golang.org/x/crypto/ssh"
 )
@@ -95,9 +96,14 @@ func (ce *containerEnv) terminate(ctx context.Context) {
 }
 
 // readContainerHostKey reads the ed25519 host public key by executing
-// `cat` inside the running container.
+// `cat` inside the running container. tcexec.Multiplexed() is required here:
+// without it, Exec's reader carries Docker's raw stream-multiplexing frame
+// headers interleaved with the actual output, which corrupts the key text.
 func readContainerHostKey(ctx context.Context, c testcontainers.Container) (ssh.PublicKey, error) {
-	exitCode, reader, err := c.Exec(ctx, []string{"cat", "/etc/ssh/ssh_host_ed25519_key.pub"})
+	exitCode, reader, err := c.Exec(ctx,
+		[]string{"cat", "/etc/ssh/ssh_host_ed25519_key.pub"},
+		tcexec.Multiplexed(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("exec cat host key: %w", err)
 	}

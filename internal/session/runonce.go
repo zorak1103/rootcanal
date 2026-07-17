@@ -157,6 +157,19 @@ func (c *cappedBuffer) Truncated() bool {
 }
 
 func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (RunOnceOutput, error) {
+	// Fail fast on concurrency limit before touching the pool or dialing.
+	// nil runOnceSem means the limit is configured as 0 (unbounded).
+	if m.runOnceSem != nil {
+		select {
+		case m.runOnceSem <- struct{}{}:
+			defer func() { <-m.runOnceSem }()
+		default:
+			return RunOnceOutput{}, fmt.Errorf(
+				"run-once concurrency limit of %d reached; retry once an in-flight ssh_run_once call completes",
+				cap(m.runOnceSem))
+		}
+	}
+
 	if m.pool == nil {
 		return RunOnceOutput{}, fmt.Errorf("run_once: no pool configured")
 	}
