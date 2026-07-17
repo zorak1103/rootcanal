@@ -226,6 +226,10 @@ Three validation layers are applied to every `sftp_read`, `sftp_write`, and `sft
 
 Hosts without `sftp_enabled: true` have all `sftp_*` calls rejected, even if SFTP credentials would otherwise permit access.
 
+**Symlinks:** after the lexical allowlist check, rootcanal asks the remote SFTP server to canonicalize the path (`REALPATH`) and re-checks the *resolved* path against the same prefixes, so a symlink inside an allowed prefix that points outside it (e.g. `/srv/app/link -> /etc/shadow`) is rejected. A small window remains between that check and the actual file operation if the symlink is swapped concurrently — SFTP has no atomic "open only if it resolves under X" primitive to close it fully.
+
+**`sftp_allowed_prefixes` scopes the SFTP tools only** — it does not sandbox the host. `ssh_run_once` and persistent shell sessions run arbitrary commands with no path restriction, so any path the remote user can reach is also reachable via `cat`, `cp`, etc., regardless of the SFTP prefix list. Do not rely on `sftp_allowed_prefixes` as a general filesystem boundary for a host that also has shell access enabled (which is every host, since `ssh_run_once` is always registered).
+
 ## Known limitations
 
 - **Output framing uses sentinel markers.** `ssh_session_send` injects a `RC_EXIT_<nonce>_<code>` marker after each command and waits for it to appear in the output. For raw mode (`raw: true`) or REPL/TUI use, use `wait_idle_ms` instead; output is then returned after that many milliseconds of silence.

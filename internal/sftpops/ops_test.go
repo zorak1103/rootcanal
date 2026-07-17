@@ -55,6 +55,14 @@ type fakeFS struct {
 	removeErr       error
 	captureWriteErr error // returned by the WriteCloser from OpenFile on Write
 	captureCloseErr error // returned by the WriteCloser from OpenFile on Close
+
+	// realPath, if set, maps an input path to its "resolved" (symlink-followed)
+	// form, simulating what a real SFTP server's REALPATH would report. Paths
+	// not present in the map resolve to themselves (no symlink involved).
+	realPath map[string]string
+	// realPathErr, if a path is present (and true), makes RealPath fail for
+	// that exact input — simulating a server that errors on a nonexistent leaf.
+	realPathErr map[string]bool
 }
 
 func newFakeFS() *fakeFS {
@@ -127,6 +135,21 @@ func (f *fakeFS) Remove(path string) error {
 	}
 	delete(f.files, path)
 	return nil
+}
+
+// RealPath simulates server-side canonicalization. If realPathErr has an
+// entry for p, RealPath fails (simulating a server error, e.g. nonexistent
+// leaf). If realPath has an entry for p, that resolved value is returned
+// (simulating a symlink); otherwise p is echoed back unchanged, matching
+// real SFTP servers for non-symlink paths.
+func (f *fakeFS) RealPath(p string) (string, error) {
+	if f.realPathErr[p] {
+		return "", errors.New("realpath: no such file or component")
+	}
+	if resolved, ok := f.realPath[p]; ok {
+		return resolved, nil
+	}
+	return p, nil
 }
 
 // captureBuf captures Write calls and stores them in fakeFS on Close.
@@ -570,6 +593,120 @@ func TestValidateSFTPPath_List_RelativePath(t *testing.T) {
 
 func containsStr(s, sub string) bool {
 	return strings.Contains(s, sub)
+}
+
+// ---- Symlink-escape re-validation tests (RealPath) ----
+
+func TestRead_SymlinkEscapesPrefix_Denied(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	ffs := newFakeFS()
+	ffs.files["/srv/app/link"] = []byte("irrelevant — real read never happens")
+	// /srv/app/link is lexically inside the allowlist, but the server reports
+	// it resolves (via symlink) to /etc/shadow, outside any allowed prefix.
+	ffs.realPath = map[string]string{"/srv/app/link": "/etc/shadow"}
+
+	o := newTestOps(cfg, okPool(), ffs)
+	_, _, err := o.Read(context.Background(), "h", "/srv/app/link", 0)
+	if err == nil || !containsStr(err.Error(), "outside any allowed prefix") {
+		t.Fatalf("expected symlink-escape denial, got: %v", err)
+	}
+}
+
+func TestList_SymlinkEscapesPrefix_Denied(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	ffs := newFakeFS()
+	ffs.dirs["/srv/app/linkdir"] = nil
+	ffs.realPath = map[string]string{"/srv/app/linkdir": "/root"}
+
+	o := newTestOps(cfg, okPool(), ffs)
+	_, err := o.List(context.Background(), "h", "/srv/app/linkdir")
+	if err == nil || !containsStr(err.Error(), "outside any allowed prefix") {
+		t.Fatalf("expected symlink-escape denial, got: %v", err)
+	}
+}
+
+func TestWrite_ExistingSymlinkEscapesPrefix_Denied(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	ffs := newFakeFS()
+	// The target itself already exists as a symlink pointing outside the prefix.
+	ffs.realPath = map[string]string{"/srv/app/config.yaml": "/etc/cron.d/evil"}
+
+	o := newTestOps(cfg, okPool(), ffs)
+	err := o.Write(context.Background(), "h", "/srv/app/config.yaml", []byte("x"), 0, false)
+	if err == nil || !containsStr(err.Error(), "outside any allowed prefix") {
+		t.Fatalf("expected symlink-escape denial, got: %v", err)
+	}
+	if _, wrote := ffs.files["/srv/app/config.yaml"]; wrote {
+		t.Error("write must not have happened once the symlink escape was detected")
+	}
+}
+
+func TestWrite_NewFile_ParentSymlinkEscapesPrefix_Denied(t *testing.T) {
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	ffs := newFakeFS()
+	// The file doesn't exist yet (RealPath on the full path fails, as it
+	// would for a nonexistent leaf on a strict server); the parent
+	// directory, however, resolves outside the allowed prefix.
+	ffs.realPath = map[string]string{"/srv/app": "/tmp/evil-mount"}
+	ffs.realPathErr = map[string]bool{"/srv/app/newfile.txt": true}
+
+	o := newTestOps(cfg, okPool(), ffs)
+	err := o.Write(context.Background(), "h", "/srv/app/newfile.txt", []byte("x"), 0, false)
+	if err == nil || !containsStr(err.Error(), "outside any allowed prefix") {
+		t.Fatalf("expected symlink-escape denial via parent dir, got: %v", err)
+	}
+}
+
+func TestSFTP_SymlinkWithinPrefix_Allowed(t *testing.T) {
+	// A symlink that resolves to a different, but still-allowed, path must
+	// not be denied — only escapes outside every allowed prefix are rejected.
+	cfg := &config.Config{
+		Limits: config.Limits{SFTPMaxReadBytes: 5 << 20, SFTPMaxWriteBytes: 25 << 20},
+		Hosts: map[string]config.Host{
+			"h": {Address: "h:22", User: "u", SFTPEnabled: true, SFTPAllowedPrefixes: []string{"/srv/app"}},
+		},
+	}
+	ffs := newFakeFS()
+	ffs.files["/srv/app/current"] = []byte("hello")
+	ffs.realPath = map[string]string{"/srv/app/current": "/srv/app/releases/v3"}
+
+	o := newTestOps(cfg, okPool(), ffs)
+	data, _, err := o.Read(context.Background(), "h", "/srv/app/current", 0)
+	if err != nil {
+		t.Fatalf("unexpected denial for in-prefix symlink target: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Errorf("Read() = %q, want %q", data, "hello")
+	}
+}
+
+func TestResolveRealPath_BothFail_FallsBackToLexicalPath(t *testing.T) {
+	ffs := newFakeFS()
+	ffs.realPathErr = map[string]bool{"/a/b": true, "/a": true}
+	got := resolveRealPath(ffs, "/a/b")
+	if got != "/a/b" {
+		t.Errorf("resolveRealPath fallback = %q, want unchanged %q", got, "/a/b")
+	}
 }
 
 // ---- SFTP integration test (covers defaultNewClient + realSFTPClient adapters) ----

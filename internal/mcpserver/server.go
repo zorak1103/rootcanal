@@ -145,7 +145,14 @@ func registerHostKeyTool(srv *mcp.Server, cfg *config.Config, hk hostkeys.Refres
 			"Call without confirm to preview the current and new key fingerprints. " +
 			"Call with confirm=true and expected_fingerprint=<new_fingerprint> to rewrite " +
 			"the known_hosts entry. Requires allow_known_hosts_update: true on the host. " +
-			"Only use after a human has confirmed the server was legitimately rebuilt.",
+			"Only use after a human has verified the new fingerprint OUT-OF-BAND — e.g. against " +
+			"the hosting provider's console, a config-management record, or a call to whoever " +
+			"rebuilt the host. This tool's own preview scan cannot detect a man-in-the-middle: " +
+			"it is a plain, unverified connection by design (there is no stored key to check " +
+			"against yet), so a network attacker positioned during the scan could present a " +
+			"forged key that looks self-consistent across repeated previews. Do not treat a " +
+			"human simply clicking 'confirm' as sufficient — the fingerprint must have been " +
+			"checked against an independent source first.",
 	}, handleAcceptHostKey(hk))
 }
 

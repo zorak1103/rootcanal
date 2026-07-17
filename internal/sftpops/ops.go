@@ -43,6 +43,11 @@ type sftpClientIface interface {
 	ReadDir(path string) ([]fs.FileInfo, error)
 	Rename(oldpath, newpath string) error
 	Remove(path string) error
+	// RealPath asks the server to canonicalize path, resolving any symlinks
+	// along the way. Used to re-check sftp_allowed_prefixes against the real
+	// target after the lexical path.Clean check in validateSFTPPath, closing
+	// the gap where a symlink inside an allowed prefix points outside it.
+	RealPath(path string) (string, error)
 	Close() error
 }
 
@@ -54,6 +59,7 @@ func (r *realSFTPClient) OpenFile(p string, f int) (io.WriteCloser, error) {
 	return r.Client.OpenFile(p, f)
 }
 func (r *realSFTPClient) ReadDir(p string) ([]fs.FileInfo, error) { return r.Client.ReadDir(p) }
+func (r *realSFTPClient) RealPath(p string) (string, error)       { return r.Client.RealPath(p) }
 
 // poolGetter abstracts pool.Get so sftpops can be tested without a real Pool.
 type poolGetter func(ctx context.Context, host string) (*ssh.Client, func(), error)
@@ -114,6 +120,45 @@ func pathMatchesAnyPrefix(p string, prefixes []string) bool {
 	return false
 }
 
+// resolveRealPath asks the SFTP server to canonicalize cleanedPath, following
+// any symlinks along the way. It tries the full path first (covers existing
+// files, directories, and symlinks); if that fails — e.g. the leaf does not
+// exist yet, which is normal when writing a new file — it falls back to
+// resolving just the parent directory and rejoining the original basename.
+// If both fail, resolution is skipped and cleanedPath is returned unchanged:
+// RealPath is a hardening layer on top of the lexical check, not a hard
+// requirement for basic operation (some SFTP server implementations may
+// restrict or reject REALPATH requests).
+func resolveRealPath(client sftpClientIface, cleanedPath string) string {
+	if resolved, err := client.RealPath(cleanedPath); err == nil {
+		return path.Clean(resolved)
+	}
+	dir := path.Dir(cleanedPath)
+	if realDir, err := client.RealPath(dir); err == nil {
+		return path.Join(path.Clean(realDir), path.Base(cleanedPath))
+	}
+	return cleanedPath
+}
+
+// checkResolvedPath re-validates the server-resolved form of cleanedPath
+// against the host's allowed prefixes. validateSFTPPath only checks the
+// lexical (path.Clean'd) form of the caller-supplied path; if a component of
+// that path is a symlink pointing outside the allowed prefixes, the lexical
+// check alone would let it through. This closes that gap. A small TOCTOU
+// window remains if the symlink is swapped between this check and the actual
+// Open/OpenFile/ReadDir call — SFTP has no atomic "open only if it resolves
+// under X" primitive, so that residual window is accepted.
+func (o *ops) checkResolvedPath(host, cleanedPath, resolved string) error {
+	if resolved == cleanedPath {
+		return nil // nothing to re-check; the lexical check already covers this
+	}
+	h := o.cfg.Hosts[host] // presence already guaranteed by validateSFTPPath
+	if !pathMatchesAnyPrefix(resolved, h.SFTPAllowedPrefixes) {
+		return fmt.Errorf("path %q resolves to %q via a symlink, which is outside any allowed prefix", cleanedPath, resolved)
+	}
+	return nil
+}
+
 // openSFTP is the shared dial-and-open helper used by all three operations.
 func (o *ops) openSFTP(ctx context.Context, host string) (sftpClientIface, func(), error) {
 	client, release, err := o.get(ctx, host)
@@ -143,6 +188,10 @@ func (o *ops) Read(ctx context.Context, host, p string, maxBytes int) (data []by
 		return nil, false, err
 	}
 	defer cleanup()
+
+	if resolveErr := o.checkResolvedPath(host, cleanedPath, resolveRealPath(sftpClient, cleanedPath)); resolveErr != nil {
+		return nil, false, resolveErr
+	}
 
 	f, err := sftpClient.Open(cleanedPath)
 	if err != nil {
@@ -180,6 +229,10 @@ func (o *ops) Write(ctx context.Context, host, fpath string, content []byte, mod
 		return err
 	}
 	defer cleanup()
+
+	if resolveErr := o.checkResolvedPath(host, cleanedPath, resolveRealPath(sftpClient, cleanedPath)); resolveErr != nil {
+		return resolveErr
+	}
 
 	writePath := cleanedPath
 	if atomicWrite {
@@ -244,6 +297,10 @@ func (o *ops) List(ctx context.Context, host, p string) ([]Entry, error) {
 		return nil, err
 	}
 	defer cleanup()
+
+	if resolveErr := o.checkResolvedPath(host, cleanedPath, resolveRealPath(sftpClient, cleanedPath)); resolveErr != nil {
+		return nil, resolveErr
+	}
 
 	infos, err := sftpClient.ReadDir(cleanedPath)
 	if err != nil {
