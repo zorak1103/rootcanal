@@ -9,8 +9,6 @@
 .claude/*
 !.claude/skills
 CLAUDE.local.md
-/audit/
-/TODO/
-.remember/
-docs/superpowers/
-temp/
+
+
+
