@@ -892,6 +892,39 @@ func TestManager_Send_ExitCode(t *testing.T) {
 	mgr.Close(context.Background(), id)
 }
 
+// ---- markerFoundResult exit-code parsing (N2) ----
+
+func TestMarkerFoundResult_ValidCode_SetsExitCode(t *testing.T) {
+	s := &session{}
+	res := markerFoundResult(s, []byte("out"), []byte("7\n"), false, false, nil)
+	if res.ExitCode == nil || *res.ExitCode != 7 {
+		t.Fatalf("ExitCode = %v, want 7", res.ExitCode)
+	}
+	if s.lastExitCode == nil || *s.lastExitCode != 7 {
+		t.Fatalf("s.lastExitCode = %v, want 7", s.lastExitCode)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("unexpected warnings for a valid marker: %v", res.Warnings)
+	}
+}
+
+func TestMarkerFoundResult_UnparsableCode_ExitCodeNilWithWarning(t *testing.T) {
+	// A corrupted or unexpected marker (e.g. the remote echoed something
+	// between the nonce and the numeric code) must not be silently reported
+	// as exit code 0 — that would mask a real failure as a success.
+	s := &session{}
+	res := markerFoundResult(s, []byte("some output"), []byte("not-a-number\ntrailing"), false, false, nil)
+	if res.ExitCode != nil {
+		t.Errorf("ExitCode = %d, want nil for an unparsable marker", *res.ExitCode)
+	}
+	if len(res.Warnings) == 0 || !strings.Contains(res.Warnings[0], "could not parse exit code") {
+		t.Errorf("expected a parse-failure warning, got: %v", res.Warnings)
+	}
+	if s.lastExitCode != nil {
+		t.Errorf("s.lastExitCode should stay nil when parsing fails, got %d", *s.lastExitCode)
+	}
+}
+
 func TestManager_Send_StillRunning_Continuation(t *testing.T) {
 	gate := make(chan struct{})
 	gated := &gatedFakeSession{fakeSession: newFakeSession(), gate: gate}

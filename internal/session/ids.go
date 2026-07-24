@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/zorak1103/rootcanal/internal/config"
 )
 
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -23,7 +25,10 @@ func newSessionID() string {
 	return "s_" + b32.EncodeToString(buf[:])
 }
 
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+// nameRe reuses config.NamePattern (the same pattern host names must match)
+// so client-supplied session names and host names stay in sync by
+// construction instead of via two hand-copied regexes.
+var nameRe = regexp.MustCompile(config.NamePattern)
 
 // newMarkerNonce returns an 8-char base32 random token for in-band markers.
 func newMarkerNonce() string {

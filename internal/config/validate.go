@@ -6,12 +6,20 @@ import (
 	"net"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/zorak1103/rootcanal/internal/pathutil"
 )
 
-var hostNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+// NamePattern is the shared identifier pattern for host names (this package)
+// and client-supplied session names (internal/session): lowercase
+// alphanumeric plus '.', '_', '-', starting with an alphanumeric character,
+// 1-63 characters total. Exported so internal/session/ids.go can reuse the
+// same pattern instead of carrying its own copy.
+const NamePattern = `^[a-z0-9][a-z0-9._-]{0,62}$`
+
+var hostNameRe = regexp.MustCompile(NamePattern)
 
 // Validate checks all hosts and limits for correctness and normalises addresses.
 // Returns a joined error listing all validation problems found.
@@ -129,12 +137,9 @@ func validateSFTPConfig(hostName string, h *Host) error {
 	return nil
 }
 
-// expandPath replaces a leading ~ with the user's home directory.
+// expandPath replaces a leading ~/ with the user's home directory.
+// Thin wrapper kept so existing tests can call expandPath directly; the
+// actual logic lives in internal/pathutil, shared with internal/sshconn.
 func expandPath(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, p[2:])
-		}
-	}
-	return p
+	return pathutil.ExpandTilde(p)
 }

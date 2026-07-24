@@ -110,6 +110,9 @@ func newManager(cfg *config.Config, factory newSessionFn, log *slog.Logger) *man
 		gcStop:   make(chan struct{}),
 		gcDone:   make(chan struct{}),
 	}
+	if n := cfg.Limits.MaxRunOnceConcurrent; n > 0 {
+		m.runOnceSem = make(chan struct{}, n)
+	}
 	go m.runGC()
 	return m
 }
@@ -119,6 +122,11 @@ type manager struct {
 	factory newSessionFn
 	log     *slog.Logger
 	pool    *hostpool.Pool // nil in tests that don't exercise RunOnce
+
+	// runOnceSem bounds concurrent RunOnce calls to cfg.Limits.MaxRunOnceConcurrent.
+	// nil means unbounded (limit configured as 0). Detach is intentionally not
+	// gated by this semaphore — see the comment on Detach in detach.go.
+	runOnceSem chan struct{}
 
 	mu       sync.RWMutex
 	sessions map[string]*session
@@ -454,6 +462,9 @@ func (m *manager) sendRaw(ctx context.Context, s *session, id string, in SendInp
 	s.lastUsedAt = time.Now()
 	s.mu.Unlock()
 	ch := make(chan error, 1)
+	// If ctx.Done() fires first below, this goroutine is left running; it is
+	// bounded by s.stdin.Close() in Close()/Shutdown(), which unblocks any
+	// pending Write with an error, so it cannot leak past the session's life.
 	go func() { _, err := s.stdin.Write([]byte(in.Input)); ch <- err }()
 	select {
 	case err := <-ch:
@@ -492,6 +503,8 @@ func (m *manager) sendNormal(ctx context.Context, s *session, id string, in Send
 		cmd = fmt.Sprintf("%s; printf '\\nRC_EXIT_%s_%%d\\n' $?\n", trimmed, nonce)
 	}
 	ch := make(chan error, 1)
+	// See the identical comment in sendRaw above: if ctx.Done() fires first,
+	// this goroutine outlives the call but is bounded by s.stdin.Close().
 	go func() { _, err := s.stdin.Write([]byte(cmd)); ch <- err }()
 	select {
 	case err := <-ch:
@@ -577,30 +590,43 @@ func (m *manager) waitForMarker(
 // markerFoundResult finalizes a Send/waitForMarker call once the exit marker
 // (\nRC_EXIT_<nonce>_<code>\n, already split into before/rest by bytes.Cut)
 // was found: it parses the exit code, clears s.inflight, and records the
-// code as the session's last exit code.
+// code as the session's last exit code. If the marker's code segment fails
+// to parse (a corrupted or unexpected marker), ExitCode is left nil and a
+// warning is surfaced instead of silently reporting exit code 0 — a
+// fabricated "success" is worse than an absent result.
 func markerFoundResult(s *session, before, rest []byte, raw, trunc bool, warnings []string) SendResult {
 	end := bytes.IndexByte(rest, '\n')
 	if end < 0 {
 		end = len(rest)
 	}
-	code, _ := strconv.Atoi(strings.TrimSpace(string(rest[:end])))
+	code, parseErr := strconv.Atoi(strings.TrimSpace(string(rest[:end])))
 
 	output := before
 	if !raw {
 		output = cleanOutput(output)
 	}
 
+	var exitCode *int
+	if parseErr != nil {
+		warnings = append(warnings, "could not parse exit code from marker; output may be incomplete or the command may have echoed unexpected text")
+	} else {
+		ec := code
+		exitCode = &ec
+	}
+
 	s.mu.Lock()
 	s.inflight = nil
-	ec := code
-	s.lastExitCode = &ec
+	if exitCode != nil {
+		ec := *exitCode
+		s.lastExitCode = &ec
+	}
 	s.lastUsedAt = time.Now()
 	cr := s.closedReason
 	s.mu.Unlock()
 
 	return SendResult{
 		Output:       string(output),
-		ExitCode:     &code,
+		ExitCode:     exitCode,
 		Truncated:    trunc,
 		ClosedReason: cr,
 		Warnings:     warnings,

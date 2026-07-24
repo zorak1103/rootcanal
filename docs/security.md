@@ -31,7 +31,7 @@ The `ssh_accept_host_key` tool provides an in-MCP path to re-trust a changed hos
 
 1. **Per-host gate:** The host must have `allow_known_hosts_update: true` in config. Absent this flag, the tool refuses with an error. Every host defaults to `false`.
 2. **Preview step:** The first call (without `confirm`) scans the live key and returns both the stored and new fingerprints. No write occurs.
-3. **Human confirmation:** The operator reviews the fingerprint change and confirms the rebuild was legitimate.
+3. **Human confirmation:** The operator reviews the fingerprint change and confirms the rebuild was legitimate. This confirmation must rest on **out-of-band** verification — e.g. the new fingerprint checked against a value from the hosting provider's console, a config-management record, or a phone call to whoever rebuilt the host. The live scan itself proves nothing on its own: it is a plain TCP connection with host-key verification intentionally disabled (that's the whole point — it has no stored key to check against yet), so a network position capable of a MITM during the scan can present the *same* forged key to every preview call, making the "change" look self-consistent. Fingerprint-matches-preview is a TOCTOU guard, not a MITM guard.
 4. **Fingerprint echo:** The confirm call must include `expected_fingerprint` matching the value from the preview. The entry is only rewritten if the live key still matches it, closing the TOCTOU window.
 5. **Surgical write:** Only the matching key type's line is replaced; all other entries (including other hosts in a shared `~/.ssh/known_hosts`) are preserved. The file is rewritten atomically with `0600` permissions.
 
@@ -42,6 +42,8 @@ The `ssh_accept_host_key` tool provides an in-MCP path to re-trust a changed hos
 The config schema has `password_env` and `passphrase_env` fields (environment variable *names*), not `password` or `passphrase` fields (values). The YAML decoder is configured with `KnownFields(true)` so any attempt to add a `password: secret` key is rejected at parse time with an explicit error.
 
 OS keyring (`go-keyring`) support is planned for a post-2.0 release, with backends for Windows Credential Manager, macOS Keychain and Linux Secret Service. The config shape is already reserved as `password_keyring: rootcanal/<host>` to avoid breaking changes.
+
+**Env-var interpolation is a raw-byte substitution, before YAML parsing.** `${VAR}` and `${VAR:-default}` in the config file are replaced by `config.Expand` operating on the raw file bytes, *before* the YAML decoder ever runs. An env value containing a colon, a newline, or YAML-significant characters can therefore change the structure of the document being parsed, not just fill in a scalar. This is a config-authoring hazard (the operator controls both the config and the environment), not an LLM-facing attack surface, but it means env-derived values that might contain such characters should be quoted in the YAML, e.g. `password_env: "${ROOTCANAL_PASS}"`.
 
 ### 4. Resource caps
 
@@ -55,11 +57,13 @@ The config `limits` section enforces:
 | `sftp_max_write_bytes` | Prevents the LLM writing arbitrarily large files |
 | `run_once_max_bytes` | Per-stream output cap for `ssh_run_once` (default 1 MiB each for stdout/stderr) |
 | `run_once_max_timeout_ms` | Hard timeout cap for `ssh_run_once` calls (default 60 s) |
-| `max_run_once_concurrent` | Bounds concurrent `ssh_run_once` exec channels (default 16) |
+| `max_run_once_concurrent` | Bounds concurrent *synchronous* `ssh_run_once` calls (default 16); does not apply to `detach: true` jobs, which are bounded by the job registry's `max_jobs` and by `max_sessions_per_host` instead |
 
 Both `max_sessions_total` and `max_sessions_per_host` are enforced atomically: the limit check and the slot reservation happen under the same mutex, before the SSH dial begins. Concurrent `ssh_session_open` calls cannot collectively bypass the cap even when the dial takes hundreds of milliseconds.
 
 The idle GC (`default_idle_timeout`, `max_session_age`) reclaims resources from abandoned sessions without operator intervention.
+
+**Detached jobs and per-host capacity interact.** A detached job (`ssh_run_once` with `detach: true`) holds a `hostpool` reference for its entire run, which can be up to `detach_max_duration_ms` (default 24 h). Each such job counts against `max_sessions_per_host` (default 4) for that host. A handful of long-running detached jobs on one host can therefore exhaust its session capacity and block further `ssh_session_open`/`ssh_run_once` calls on that host until a job finishes or is cancelled with `ssh_job_cancel`. `max_run_once_concurrent` does not help here — it bounds *synchronous* `ssh_run_once` calls only.
 
 ### 5. Bounded output buffer
 
@@ -111,6 +115,10 @@ The prefix check uses an exact separator boundary: prefix `/srv/app` matches `/s
 
 To grant access to the entire remote filesystem, set `sftp_allowed_prefixes: ["/"]`. This is a deliberate escape hatch that must be written explicitly.
 
+**Layer 3b — symlink resolution re-check.** Layer 3's check is lexical (`path.Clean` plus a string-prefix comparison), so a symlink whose *name* sits inside an allowed prefix but whose *target* does not (e.g. `/srv/app/link -> /etc/shadow`) would otherwise pass. After connecting, rootcanal asks the SFTP server to canonicalize the path (`REALPATH`, which follows symlinks server-side) and re-runs the same prefix check against the resolved result, rejecting the call if the resolved path escapes every allowed prefix. A narrow TOCTOU window remains between this check and the subsequent open if the symlink is swapped concurrently by something else with write access to that directory — SFTP has no atomic "open only if the resolved path is under X" primitive, so this window cannot be fully closed from the client side.
+
+**`sftp_allowed_prefixes` scopes the SFTP tools only — it is not a filesystem sandbox for the host.** `ssh_run_once` and the persistent-session tools execute arbitrary shell commands with no path restriction and are enabled by default (see §10). Any path reachable by the SSH user is reachable via `cat`, `cp`, `tee`, etc., regardless of what `sftp_allowed_prefixes` says. Configure `sftp_allowed_prefixes` to scope what the *SFTP tools specifically* may touch — for example to steer the LLM toward a project directory — not as a security boundary that shell access would otherwise bypass. If you need a hard filesystem boundary, enforce it at the SSH server (e.g. `ChrootDirectory`, a restricted shell, or a dedicated low-privilege OS user) rather than relying on this config field.
+
 Server-side controls (e.g. `ChrootDirectory` in `sshd_config`) remain valid defence-in-depth and are not replaced by the above — they are complementary.
 
 ### 9. Agent auth security
@@ -132,6 +140,7 @@ PuTTY/Pageant use a different protocol and are not supported. Support would requ
 - Network-level attacks other than host-key mismatch (e.g. traffic monitoring): use the SSH transport's encryption, which is always on.
 - Privilege escalation on the remote host: rootcanal authenticates as a specific user; what that user can do is a matter of remote host configuration.
 - A compromised LLM with operator-granted unrestricted tool access: rootcanal is a tool boundary; auditing is the operator's responsibility.
+- **A malicious or compromised *remote host*.** `ssh_session_send`'s completion signal (`RC_EXIT_<nonce>_<code>`) is written to the same output stream the remote shell controls and is matched by simple substring search. A host that has been compromised, or a command that happens to echo attacker-controlled text, can forge this marker and cause rootcanal to report a fabricated exit code and truncated output. rootcanal's trust boundary is "hosts the operator has pre-declared," not "hosts whose *output* can be trusted against active tampering" — treat `exit_code`/`output` as authoritative only for hosts you already trust.
 
 ## Reporting security issues
 

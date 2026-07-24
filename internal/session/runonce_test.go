@@ -1,12 +1,59 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 )
+
+// ---- RunOnce concurrency limit (MaxRunOnceConcurrent) ----
+
+func TestManager_RunOnce_ConcurrencyLimitReached(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.MaxRunOnceConcurrent = 2
+	mgr := newManager(cfg, fakeSessions(), nil)
+	defer mgr.Shutdown(context.Background())
+
+	// Fill the semaphore directly; RunOnce must fail fast before ever
+	// touching m.pool (which is nil here, proving the check runs first).
+	mgr.runOnceSem <- struct{}{}
+	mgr.runOnceSem <- struct{}{}
+
+	_, err := mgr.RunOnce(context.Background(), "h", RunOnceInput{Command: "ls"})
+	if err == nil {
+		t.Fatal("expected concurrency limit error")
+	}
+	if !strings.Contains(err.Error(), "concurrency limit of 2") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Draining one slot must let the next call proceed past the semaphore
+	// (it still fails on nil pool, but with a different error).
+	<-mgr.runOnceSem
+	_, err = mgr.RunOnce(context.Background(), "h", RunOnceInput{Command: "ls"})
+	if err == nil || !strings.Contains(err.Error(), "no pool configured") {
+		t.Errorf("expected nil-pool error once a slot freed up, got: %v", err)
+	}
+}
+
+func TestManager_RunOnce_ConcurrencyUnbounded(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.MaxRunOnceConcurrent = 0
+	mgr := newManager(cfg, fakeSessions(), nil)
+	defer mgr.Shutdown(context.Background())
+
+	if mgr.runOnceSem != nil {
+		t.Fatal("expected nil semaphore when MaxRunOnceConcurrent is 0")
+	}
+
+	_, err := mgr.RunOnce(context.Background(), "h", RunOnceInput{Command: "ls"})
+	if err == nil || !strings.Contains(err.Error(), "no pool configured") {
+		t.Errorf("expected nil-pool error (semaphore bypassed), got: %v", err)
+	}
+}
 
 // ---- classifyRunResult tests (Bug #15) ----
 
