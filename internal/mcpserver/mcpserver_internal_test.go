@@ -1,7 +1,10 @@
 package mcpserver
 
 import (
+	"context"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestSanitizeOutput_ValidUTF8(t *testing.T) {
@@ -30,5 +33,39 @@ func TestFormatSessionList_Empty(t *testing.T) {
 	got := formatSessionList(nil)
 	if got != "No open sessions." {
 		t.Errorf("empty list: got %q, want 'No open sessions.'", got)
+	}
+}
+
+func TestRejectDiscoverMiddleware_RejectsDiscover(t *testing.T) {
+	nextCalled := false
+	mw := rejectDiscoverMiddleware()
+	handler := mw(func(_ context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		nextCalled = true
+		return nil, nil
+	})
+
+	_, err := handler(context.Background(), "server/discover", &mcp.CallToolRequest{})
+	if err == nil {
+		t.Fatal("expected server/discover to be rejected")
+	}
+	if nextCalled {
+		t.Error("next should not be called for server/discover")
+	}
+}
+
+func TestRejectDiscoverMiddleware_PassesThroughOtherMethods(t *testing.T) {
+	nextCalled := false
+	mw := rejectDiscoverMiddleware()
+	handler := mw(func(_ context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		nextCalled = true
+		return nil, nil
+	})
+
+	_, err := handler(context.Background(), "tools/call", &mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error for non-discover method: %v", err)
+	}
+	if !nextCalled {
+		t.Error("next should be called for methods other than server/discover")
 	}
 }

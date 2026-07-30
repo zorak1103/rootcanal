@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/zorak1103/rootcanal/internal/config"
@@ -29,6 +30,10 @@ import (
 //
 // onInitialized, if non-nil, is called once the MCP session handshake completes
 // so the caller can swap in an mcp.NewLoggingHandler to route logs to the client.
+// The server rejects the newer SEP-2575 server/discover RPC (see
+// rejectDiscoverMiddleware) specifically so this handshake — and therefore
+// onInitialized — always runs, even for clients that default to the modern
+// protocol.
 func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Registry, hk hostkeys.Refresher, onInitialized func(*mcp.ServerSession)) *mcp.Server {
 	opts := &mcp.ServerOptions{}
 	if onInitialized != nil {
@@ -42,7 +47,7 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Reg
 		Version: version.Version,
 	}, opts)
 
-	srv.AddReceivingMiddleware(fieldSuggestionMiddleware())
+	srv.AddReceivingMiddleware(rejectDiscoverMiddleware(), fieldSuggestionMiddleware())
 
 	registerSessionTools(srv, mgr)
 	registerSFTPTools(srv, ops)
@@ -52,6 +57,25 @@ func New(mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Reg
 	registerSkillTools(srv)
 
 	return srv
+}
+
+// rejectDiscoverMiddleware refuses the SEP-2575 "server/discover" RPC. Per
+// spec, a client falls back to the legacy initialize/notifications/initialized
+// handshake on any non-version error from server/discover — so this forces
+// every client through that handshake regardless of its own SDK version.
+// rootcanal is a long-lived stdio server, never a stateless HTTP one, so the
+// new stateless fast path has nothing to offer it, while skipping the
+// handshake would silently stop InitializedHandler from firing (it is used
+// above to swap logging over to mcp.NewLoggingHandler once a session is up).
+func rejectDiscoverMiddleware() mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "server/discover" {
+				return nil, errors.New("rootcanal: server/discover unsupported, use the initialize handshake")
+			}
+			return next(ctx, method, req)
+		}
+	}
 }
 
 // registerSessionTools registers the four persistent-shell-session tools.
