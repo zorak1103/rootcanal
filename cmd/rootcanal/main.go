@@ -68,6 +68,7 @@ func main() {
 	hk := hostkeys.New(cfg, sshconn.ProdScanner{})
 
 	srv := mcpserver.New(mgr, ops, cfg, jobReg, hk, func(ss *mcp.ServerSession) {
+		//nolint:staticcheck // SEP-2577: logging remains functional during the 12-month deprecation window; migrate before it's removed.
 		mcpH := mcp.NewLoggingHandler(ss, &mcp.LoggingHandlerOptions{
 			LoggerName:  "rootcanal",
 			MinInterval: 100 * time.Millisecond,
