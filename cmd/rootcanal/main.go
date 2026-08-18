@@ -61,6 +61,7 @@ func main() {
 	log := slog.New(swap)
 
 	pool := hostpool.New(cfg, sshconn.ProdDialer{})
+	defer pool.Close()
 	mgr := session.NewManager(cfg, pool, log)
 	ops := sftpops.New(cfg, pool)
 	jobReg := jobs.NewRegistry(cfg.Limits.MaxJobs, cfg.Limits.JobTTL)
@@ -92,7 +93,6 @@ func main() {
 	if err := mgr.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown error", "err", err)
 	}
-	pool.Close()
 }
 
 // runProbe dials the named host and reports success/failure, returning the
