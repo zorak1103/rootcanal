@@ -49,6 +49,22 @@ tasks:
       # renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
       - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
+  mutate:install:
+    desc: Install mutest locally (tracked by Renovate)
+    cmds:
+      # renovate: datasource=go depName=github.com/fchimpan/mutest
+      - go install github.com/fchimpan/mutest@v0.6.1
+
+  mutate:
+    desc: Run mutation testing over internal/... (no threshold, for local exploration)
+    cmds:
+      - mutest ./internal/...
+
+  mutate:ci:
+    desc: Run mutation testing on lines changed vs main (used by CI and pre-push)
+    cmds:
+      - mutest -diff origin/main -threshold 100 ./internal/...
+
   tidy:
     desc: Run go mod tidy
     cmds:
@@ -84,7 +100,7 @@ tasks:
     cmds:
       - git config core.hooksPath .githooks
       - chmod +x .githooks/pre-commit .githooks/pre-push
-      - echo "Git hooks activated (pre-commit auto-fixes gofmt; pre-push runs golangci-lint). Bypass either with --no-verify."
+      - echo "Git hooks activated (pre-commit auto-fixes gofmt; pre-push runs golangci-lint and mutest on changed lines). Bypass either with --no-verify."
 
   fmt:
     desc: Format all Go files (gofmt -s -w)

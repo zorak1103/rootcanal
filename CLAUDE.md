@@ -9,6 +9,8 @@ task build   # compile binary (outputs rootcanal / rootcanal.exe)
 task test    # run all tests
 task cover   # run tests + enforce ≥85% line coverage
 task lint    # golangci-lint v2 (requires `task lint:install` locally first)
+task mutate       # mutest over internal/... (no threshold, local exploration; requires `task mutate:install` first)
+task mutate:ci    # mutest gated on lines changed vs main (100% kill rate; what CI and pre-push run)
 
 # Run a single test package or specific test
 go test ./internal/session/ -run TestManagerSend -v
@@ -56,5 +58,5 @@ MCP client ──stdio──▶ mcpserver ──▶ session.Manager ──▶ ho
 
 ## Testing Patterns
 
-Tests use the `Dialer` interface to inject fake SSH connections without a real server. `session` and `hostpool` tests pass a `newSessionFn` factory; `mcpserver` tests use a mock `Manager`/`Ops`. All tests are table-driven.
+Tests use the `Dialer` interface to inject fake SSH connections without a real server. `session` and `hostpool` tests pass a `newSessionFn` factory; `mcpserver` tests use a mock `Manager`/`Ops`. All tests are table-driven. Mutation testing (`mutest`) is scoped to `./internal/...` — `cmd/` and `tools/covercheck` have no test files, so mutest would score them as 100% survived — and gated only on lines changed vs `main`, not the whole module.
 

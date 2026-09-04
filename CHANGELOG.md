@@ -6,6 +6,10 @@
 - `ssh_accept_host_key` MCP tool: preview and re-trust a changed SSH host key after a server rebuild. Requires `allow_known_hosts_update: true` per-host. Two-step flow: preview returns both fingerprints; confirm (with `expected_fingerprint` echo) rewrites the known_hosts entry atomically. Closes #14.
 - Per-host `allow_known_hosts_update` config field (default `false`). Enables `ssh_accept_host_key` for that host.
 - Key-mismatch error from `ProdDialer` now includes a hint pointing to `ssh_accept_host_key` and `allow_known_hosts_update`.
+- Mutation testing via `mutest`, scoped to `./internal/...` and gated on lines changed vs `main` (`-diff` + `-threshold 100`). Runs as a CI job and in the `pre-push` hook; run `task mutate` for a full unscoped report or `task mutate:install` to install locally.
+
+### Changed
+- Bumped Go toolchain requirement to 1.27.1 (`go.mod`).
 
 ---
 

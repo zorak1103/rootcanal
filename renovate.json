@@ -48,6 +48,12 @@
       "matchPackageNames": ["golang.org/x/vuln"],
       "allowedVersions": "<1.4.0 || >1.4.0",
       "automerge": true
+    },
+    {
+      "description": "Pin mutest in GitHub Actions as a go package",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["github.com/fchimpan/mutest"],
+      "automerge": true
     }
   ],
   "customManagers": [
@@ -70,6 +76,16 @@
       ],
       "datasourceTemplate": "go",
       "depNameTemplate": "golang.org/x/vuln"
+    },
+    {
+      "description": "Update mutest installed via go install",
+      "customType": "regex",
+      "managerFilePatterns": ["/\\.github/workflows/.*\\.ya?ml$/", "/Taskfile\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=go depName=github.com/fchimpan/mutest\\n.*mutest@(?<currentValue>[^\\s\"]+)"
+      ],
+      "datasourceTemplate": "go",
+      "depNameTemplate": "github.com/fchimpan/mutest"
     },
     {
       "description": "Update TruffleHog action version",

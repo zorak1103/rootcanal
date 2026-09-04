@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Mirrors CI lint job: golangci-lint on the whole module.
-# Run `task lint:install` once to install golangci-lint locally.
+# Mirrors CI lint + mutation-test jobs: golangci-lint on the whole module,
+# then mutest on lines changed vs main.
+# Run `task lint:install` and `task mutate:install` once to install locally.
 # Bypass with: git push --no-verify
 set -e
 
@@ -11,3 +12,18 @@ fi
 
 echo "→ golangci-lint run --timeout=5m ./..."
 golangci-lint run --timeout=5m ./...
+
+if ! command -v mutest >/dev/null 2>&1; then
+  echo "mutest not found. Run: task mutate:install"
+  exit 1
+fi
+
+BASE_REF=origin/main
+git rev-parse --verify --quiet "$BASE_REF" >/dev/null || BASE_REF=main
+if ! git rev-parse --verify --quiet "$BASE_REF" >/dev/null; then
+  echo "→ mutest: no main ref to diff against, skipping"
+  exit 0
+fi
+
+echo "→ mutest -diff $BASE_REF -threshold 100 ./internal/..."
+mutest -diff "$BASE_REF" -threshold 100 ./internal/...
