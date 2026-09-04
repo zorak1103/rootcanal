@@ -343,7 +343,7 @@ func (m *manager) bootSession(ctx context.Context, s *session, maxWait time.Dura
 
 	for {
 		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		if remaining <= 0 { //mutest:skip equivalent: time.Until returning exactly 0 is unreachable, and control flow re-converges on the same error after one extra zero-length spin
 			return fmt.Errorf("session boot timeout after %s: shell did not respond to ready marker", maxWait)
 		}
 		bCtx, cancel := context.WithDeadline(ctx, deadline)
@@ -540,7 +540,7 @@ func (m *manager) waitForMarker(
 
 	for {
 		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		if remaining <= 0 { //mutest:skip equivalent: time.Until returning exactly 0 is unreachable, and control flow re-converges on the same result after one extra zero-length spin
 			break
 		}
 		bCtx, cancel := context.WithDeadline(ctx, deadline)
@@ -677,7 +677,10 @@ func (m *manager) Close(_ context.Context, id string) (string, error) {
 
 	s.mu.Lock()
 	s.closed = true
-	s.closedReason = "explicit"
+	if s.closedReason == "" {
+		s.closedReason = "explicit"
+	}
+	reason := s.closedReason
 	s.mu.Unlock()
 
 	s.sendMu.Lock()
@@ -688,7 +691,7 @@ func (m *manager) Close(_ context.Context, id string) (string, error) {
 	s.releasePool()
 
 	m.log.Info("session closed", "id", id, "host", s.host)
-	return "explicit", nil
+	return reason, nil
 }
 
 func (m *manager) List() []SessionInfo {

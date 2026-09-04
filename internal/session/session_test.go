@@ -338,6 +338,22 @@ func TestManager_Open_MaxPerHost(t *testing.T) {
 	}
 }
 
+func TestManager_Open_ZeroLimitsMeansUnlimited(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.MaxSessionsTotal = 0
+	cfg.Limits.MaxSessionsPerHost = 0
+	f1, f2 := newFakeSession(), newFakeSession()
+	m := newManager(cfg, fakeSessions(f1, f2), nil)
+	defer m.Shutdown(context.Background())
+
+	if _, err := m.Open(context.Background(), "h", ""); err != nil {
+		t.Fatalf("first Open unexpected error: %v", err)
+	}
+	if _, err := m.Open(context.Background(), "h", ""); err != nil {
+		t.Fatalf("second Open unexpected error with zero (unlimited) limits: %v", err)
+	}
+}
+
 func TestManager_SendClose_RoundTrip(t *testing.T) {
 	fs := newFakeSession()
 	m := newManager(minCfg(), fakeSessions(fs), nil)
@@ -356,11 +372,67 @@ func TestManager_SendClose_RoundTrip(t *testing.T) {
 		t.Error("expected ExitCode to be set after successful Send")
 	}
 
-	if _, err := m.Close(context.Background(), id); err != nil {
+	reason, err := m.Close(context.Background(), id)
+	if err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	if reason != "explicit" {
+		t.Errorf("Close reason = %q, want %q for a plain explicit close", reason, "explicit")
 	}
 	if len(m.List()) != 0 {
 		t.Errorf("expected 0 sessions after close, got %d", len(m.List()))
+	}
+}
+
+// TestManager_Close_ReturnsExistingReason pins the fix for the closedReason
+// clobber bug: Close must not overwrite a reason that a caller (Shutdown,
+// gcTick) already set before invoking Close, and must return that effective
+// reason rather than the hardcoded "explicit" literal.
+func TestManager_Close_ReturnsExistingReason(t *testing.T) {
+	fs := newFakeSession()
+	m := newManager(minCfg(), fakeSessions(fs), nil)
+	defer m.Shutdown(context.Background())
+
+	id, err := m.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Simulate a reason set by a caller (Shutdown/gcTick) before Close runs.
+	m.mu.RLock()
+	s := m.sessions[id]
+	m.mu.RUnlock()
+	s.mu.Lock()
+	s.closedReason = "shutdown"
+	s.mu.Unlock()
+
+	reason, err := m.Close(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if reason != "shutdown" {
+		t.Errorf("Close reason = %q, want %q (must not clobber a pre-set reason)", reason, "shutdown")
+	}
+}
+
+func TestManager_Close_CleansUpPerHostEntry(t *testing.T) {
+	fs := newFakeSession()
+	m := newManager(minCfg(), fakeSessions(fs), nil)
+	defer m.Shutdown(context.Background())
+
+	id, err := m.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := m.Close(context.Background(), id); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	m.mu.RLock()
+	_, ok := m.perHost["h"]
+	m.mu.RUnlock()
+	if ok {
+		t.Error("expected perHost entry for \"h\" to be removed after Close")
 	}
 }
 
@@ -399,6 +471,35 @@ func TestManager_List(t *testing.T) {
 	}
 }
 
+func TestManager_List_StillRunning(t *testing.T) {
+	fs := newFakeSession()
+	m := newManager(minCfg(), fakeSessions(fs), nil)
+	defer m.Shutdown(context.Background())
+
+	id, _ := m.Open(context.Background(), "h", "")
+	list := m.List()
+	if len(list) != 1 || list[0].StillRunning {
+		t.Fatalf("expected StillRunning=false for a freshly opened session, got %+v", list)
+	}
+
+	// Simulate a command in flight, matching TestManager_Send_InFlightRejection.
+	m.mu.RLock()
+	s := m.sessions[id]
+	m.mu.RUnlock()
+	s.mu.Lock()
+	s.inflight = &inflight{nonce: "FAKEFAKE"}
+	s.mu.Unlock()
+
+	list = m.List()
+	if len(list) != 1 || !list[0].StillRunning {
+		t.Fatalf("expected StillRunning=true while a command is in flight, got %+v", list)
+	}
+
+	s.mu.Lock()
+	s.inflight = nil
+	s.mu.Unlock()
+}
+
 func TestManager_Shutdown(t *testing.T) {
 	f1, f2 := newFakeSession(), newFakeSession()
 	m := newManager(minCfg(), fakeSessions(f1, f2), nil)
@@ -407,6 +508,33 @@ func TestManager_Shutdown(t *testing.T) {
 	m.Shutdown(context.Background())
 	if len(m.List()) != 0 {
 		t.Errorf("expected 0 sessions after Shutdown, got %d", len(m.List()))
+	}
+}
+
+// TestManager_Shutdown_ClosedReason verifies that Shutdown's pre-set
+// "shutdown" reason survives Close's reason-clobber fix.
+func TestManager_Shutdown_ClosedReason(t *testing.T) {
+	fs := newFakeSession()
+	m := newManager(minCfg(), fakeSessions(fs), nil)
+
+	id, err := m.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	m.mu.RLock()
+	s := m.sessions[id]
+	m.mu.RUnlock()
+
+	if err := m.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	s.mu.Lock()
+	reason := s.closedReason
+	s.mu.Unlock()
+	if reason != "shutdown" {
+		t.Errorf("closedReason after Shutdown = %q, want %q", reason, "shutdown")
 	}
 }
 
@@ -435,6 +563,85 @@ func TestManager_GC_IdleSession(t *testing.T) {
 			}
 		}
 		m.Shutdown(context.Background())
+	})
+}
+
+// TestManager_GC_IdleSession_ClosedReason mirrors TestManager_GC_IdleSession
+// but verifies gcTick's pre-set "idle" reason survives Close's fix.
+func TestManager_GC_IdleSession_ClosedReason(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := minCfg()
+		cfg.Limits.DefaultIdleTimeout = 1 * time.Minute
+		cfg.Limits.MaxSessionAge = 4 * time.Hour
+
+		fs := newFakeSession()
+		m := newManager(cfg, fakeSessions(fs), nil)
+
+		id, err := m.Open(context.Background(), "h", "")
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		m.mu.RLock()
+		s := m.sessions[id]
+		m.mu.RUnlock()
+
+		time.Sleep(cfg.Limits.DefaultIdleTimeout + time.Second)
+		synctest.Wait()
+
+		s.mu.Lock()
+		reason := s.closedReason
+		s.mu.Unlock()
+		if reason != "idle" {
+			t.Errorf("closedReason after idle GC = %q, want %q", reason, "idle")
+		}
+		m.Shutdown(context.Background())
+	})
+}
+
+// TestManager_GC_MaxAgeSession_ClosedReason exercises the max_age branch of
+// gcTick's reason assignment: a short MaxSessionAge with a long
+// DefaultIdleTimeout ensures eviction happens on age, not idleness.
+func TestManager_GC_MaxAgeSession_ClosedReason(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := minCfg()
+		cfg.Limits.DefaultIdleTimeout = 1 * time.Hour
+		cfg.Limits.MaxSessionAge = 30 * time.Second
+
+		fs := newFakeSession()
+		m := newManager(cfg, fakeSessions(fs), nil)
+
+		id, err := m.Open(context.Background(), "h", "")
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		m.mu.RLock()
+		s := m.sessions[id]
+		m.mu.RUnlock()
+
+		time.Sleep(cfg.Limits.MaxSessionAge + time.Second)
+		synctest.Wait()
+
+		s.mu.Lock()
+		reason := s.closedReason
+		s.mu.Unlock()
+		if reason != "max_age" {
+			t.Errorf("closedReason after max-age GC = %q, want %q", reason, "max_age")
+		}
+		m.Shutdown(context.Background())
+	})
+}
+
+func TestSession_IsExpired_MaxAgeBoundary(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now()
+		s := &session{openedAt: now.Add(-4 * time.Hour), lastUsedAt: now}
+
+		// No wall-clock time passes between the two time.Now() calls inside
+		// isExpired within a synctest bubble, so now.Sub(openedAt) == maxAge
+		// exactly — this pins the inclusive ">=" boundary.
+		if !s.isExpired(time.Hour, 4*time.Hour) {
+			t.Error("session exactly at MaxSessionAge should be expired")
+		}
 	})
 }
 
@@ -582,6 +789,39 @@ func TestNewManager_Wiring(t *testing.T) {
 
 	mgr.Shutdown(context.Background())
 	pool.Close()
+}
+
+// TestNewManager_Wiring_LiveServer points NewManager's production factory
+// closure at a real listener (startExecSSHServer) instead of an unreachable
+// address, so pool.Get and client.NewSession() both succeed and the
+// closure's `if err != nil` guard on client.NewSession() executes on the
+// success path — TestNewManager_Wiring only ever exercises the pool.Get
+// failure branch.
+func TestNewManager_Wiring_LiveServer(t *testing.T) {
+	// RunOnce does NOT exercise this: it calls client.NewSession() directly
+	// in runonce.go, bypassing NewManager's factory closure entirely. Only
+	// Open routes through m.factory (manager.go), so it's the only way to
+	// reach the closure's `if err != nil` guard on the success path —
+	// TestNewManager_Wiring only ever exercises the pool.Get failure branch.
+	requireSh(t)
+	mgr := newLiveExecManager(t)
+
+	id, err := mgr.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open via production factory: %v", err)
+	}
+
+	res, err := mgr.Send(context.Background(), id, SendInput{Input: "echo wired\n", TimeoutMs: 5000})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !strings.Contains(res.Output, "wired") {
+		t.Errorf("Output = %q, want to contain %q", res.Output, "wired")
+	}
+
+	if _, err := mgr.Close(context.Background(), id); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 }
 
 // ---- Send on a session whose closed flag is set (in-map closed branch) ----
@@ -787,6 +1027,63 @@ type motdFakeSession struct {
 	motd string
 }
 
+// slowReadyFakeSession writes some noise immediately after receiving the boot
+// command, then delays the RC_READY_ marker beyond bootSession's 100ms
+// quiesce window — forcing its loop to run more than one iteration before
+// the marker is found.
+type slowReadyFakeSession struct {
+	*fakeSession
+	delay time.Duration
+}
+
+func (f *slowReadyFakeSession) Shell() error {
+	if f.shellErr != nil {
+		return f.shellErr
+	}
+	go func() {
+		for {
+			select {
+			case input := <-f.stdinCh:
+				if f.outWriter == nil {
+					continue
+				}
+				if idx := bytes.Index(input, []byte("RC_READY_")); idx != -1 {
+					rest := input[idx:]
+					if end := bytes.IndexByte(rest, '\n'); end > 0 {
+						marker := rest[:end]
+						_, _ = f.outWriter.Write([]byte("noise before marker\n"))
+						time.Sleep(f.delay)
+						_, _ = f.outWriter.Write(append(append([]byte("\n"), marker...), '\n'))
+					}
+					continue
+				}
+				if _, after, ok := bytes.Cut(input, []byte("RC_EXIT_")); ok {
+					if nonce, _, ok := bytes.Cut(after, []byte("_%d")); ok {
+						_, _ = f.outWriter.Write([]byte("\nRC_EXIT_" + string(nonce) + "_0\n"))
+					}
+					continue
+				}
+				_, _ = f.outWriter.Write(append([]byte("$ "), input...))
+			case <-f.closeCh:
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+func TestManager_Open_BootLoop_MultipleIterations(t *testing.T) {
+	fs := &slowReadyFakeSession{fakeSession: newFakeSession(), delay: 300 * time.Millisecond}
+	m := newManager(minCfg(), fakeSessionsIface(fs), nil)
+	defer m.Shutdown(context.Background())
+
+	id, err := m.Open(context.Background(), "h", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	m.Close(context.Background(), id)
+}
+
 func (m *motdFakeSession) Shell() error {
 	if m.shellErr != nil {
 		return m.shellErr
@@ -925,6 +1222,20 @@ func TestMarkerFoundResult_UnparsableCode_ExitCodeNilWithWarning(t *testing.T) {
 	}
 }
 
+func TestMarkerFoundResult_EmptyCodeField_ExitCodeNilWithWarning(t *testing.T) {
+	// A marker whose numeric field is empty (the newline appears immediately,
+	// e.g. a split/truncated marker) must not fall through to parsing the
+	// following output as the exit code.
+	s := &session{}
+	res := markerFoundResult(s, []byte("out"), []byte("\n7"), false, false, nil)
+	if res.ExitCode != nil {
+		t.Errorf("ExitCode = %d, want nil for an empty exit-code field", *res.ExitCode)
+	}
+	if len(res.Warnings) == 0 || !strings.Contains(res.Warnings[0], "could not parse exit code") {
+		t.Errorf("expected a parse-failure warning, got: %v", res.Warnings)
+	}
+}
+
 func TestManager_Send_StillRunning_Continuation(t *testing.T) {
 	gate := make(chan struct{})
 	gated := &gatedFakeSession{fakeSession: newFakeSession(), gate: gate}
@@ -1010,6 +1321,43 @@ func TestManager_Send_TimeoutWarning(t *testing.T) {
 	mgr.Close(context.Background(), id)
 }
 
+// ---- resolveSendTimeout ----
+
+func TestResolveSendTimeout(t *testing.T) {
+	cases := []struct {
+		name        string
+		defaultMs   int
+		maxMs       int
+		reqMs       int
+		wantTimeout time.Duration
+		wantWarning bool
+	}{
+		{"zero request uses configured default", 2000, 30000, 0, 2000 * time.Millisecond, false},
+		{"unset ceiling leaves request unclamped", 2000, 0, 90000, 90000 * time.Millisecond, false},
+		{"request equals ceiling, no clamp warning", 2000, 5000, 5000, 5000 * time.Millisecond, false},
+		{"request over ceiling is clamped", 2000, 5000, 90000, 5000 * time.Millisecond, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := minCfg()
+			cfg.Limits.DefaultSendTimeoutMs = tc.defaultMs
+			cfg.Limits.MaxSendTimeoutMs = tc.maxMs
+			m := &manager{cfg: cfg}
+
+			gotTimeout, warnings := m.resolveSendTimeout(tc.reqMs)
+			if gotTimeout != tc.wantTimeout {
+				t.Errorf("resolveSendTimeout(%d) = %v, want %v", tc.reqMs, gotTimeout, tc.wantTimeout)
+			}
+			if tc.wantWarning && len(warnings) == 0 {
+				t.Errorf("resolveSendTimeout(%d): expected clamp warning, got none", tc.reqMs)
+			}
+			if !tc.wantWarning && len(warnings) != 0 {
+				t.Errorf("resolveSendTimeout(%d): unexpected warnings: %v", tc.reqMs, warnings)
+			}
+		})
+	}
+}
+
 // ---- RunOnce unit tests (no real pool) ----
 
 func TestManager_RunOnce_NilPool(t *testing.T) {
@@ -1059,6 +1407,26 @@ func TestManager_Open_FailureReleasesReservation(t *testing.T) {
 	_, err = m.Open(context.Background(), "h", "")
 	if err != nil {
 		t.Fatalf("second Open should succeed after reservation was rolled back: %v", err)
+	}
+}
+
+func TestManager_Open_FailureCleansUpPerHostEntry(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.MaxSessionsTotal = 1
+
+	factory := errFactory(errors.New("transient dial error"))
+	m := newManager(cfg, factory, nil)
+	defer m.Shutdown(context.Background())
+
+	if _, err := m.Open(context.Background(), "h", ""); err == nil {
+		t.Fatal("expected Open to fail (factory error)")
+	}
+
+	m.mu.RLock()
+	_, ok := m.perHost["h"]
+	m.mu.RUnlock()
+	if ok {
+		t.Error("expected perHost entry for \"h\" to be removed after the reservation was rolled back")
 	}
 }
 

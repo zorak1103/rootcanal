@@ -26,6 +26,20 @@ func TestScanHostKey_ReturnsServerKey(t *testing.T) {
 	}
 }
 
+func TestScanHostKey_ZeroDialTimeout_StillReturnsKey(t *testing.T) {
+	addr, _ := startTestSSHServer(t)
+	h := config.Host{Address: addr, User: "u", Auth: config.Auth{Type: "agent"}}
+
+	// DialTimeout == 0 must mean "no deadline", not an already-expired one.
+	key, err := ScanHostKey(context.Background(), &h, config.Limits{})
+	if err != nil {
+		t.Fatalf("ScanHostKey: %v", err)
+	}
+	if key == nil {
+		t.Fatal("ScanHostKey returned nil key")
+	}
+}
+
 func TestScanHostKey_Unreachable(t *testing.T) {
 	h := config.Host{Address: "127.0.0.1:19999", User: "u", Auth: config.Auth{Type: "agent"}}
 	limits := config.Limits{DialTimeout: 300 * time.Millisecond}

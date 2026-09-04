@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -54,6 +55,40 @@ func TestHandleAcceptHostKey_Preview(t *testing.T) {
 	}
 }
 
+func TestHandleAcceptHostKey_Preview_ReturnsSuccessResult(t *testing.T) {
+	fr := &fakeRefresher{
+		inspectResult: hostkeys.InspectResult{
+			Host:       "web1",
+			CurrentFP:  "SHA256:OLD",
+			NewFP:      "SHA256:NEW",
+			Changed:    true,
+			KnownHosts: "/tmp/kh",
+		},
+	}
+	h := handleAcceptHostKey(fr)
+	result, out, err := h(context.Background(), &mcp.CallToolRequest{}, acceptHostKeyIn{Host: "web1"})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("want IsError=false on a successful preview, got a tool error result")
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("want exactly 1 content item, got %d", len(result.Content))
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is not *mcp.TextContent: %T", result.Content[0])
+	}
+	var decoded acceptHostKeyOut
+	if err := json.Unmarshal([]byte(text.Text), &decoded); err != nil {
+		t.Fatalf("content text is not valid JSON: %v", err)
+	}
+	if decoded != out {
+		t.Errorf("decoded content = %+v, want %+v", decoded, out)
+	}
+}
+
 func TestHandleAcceptHostKey_Preview_NotChanged(t *testing.T) {
 	fr := &fakeRefresher{
 		inspectResult: hostkeys.InspectResult{
@@ -97,6 +132,43 @@ func TestHandleAcceptHostKey_Confirm(t *testing.T) {
 	}
 	if !out.Refreshed {
 		t.Error("want Refreshed=true")
+	}
+}
+
+func TestHandleAcceptHostKey_Confirm_ReturnsSuccessResult(t *testing.T) {
+	fr := &fakeRefresher{
+		acceptResult: hostkeys.AcceptResult{
+			Host:       "web1",
+			NewFP:      "SHA256:NEW",
+			KnownHosts: "/tmp/kh",
+			Refreshed:  true,
+		},
+	}
+	h := handleAcceptHostKey(fr)
+	result, out, err := h(context.Background(), &mcp.CallToolRequest{}, acceptHostKeyIn{
+		Host:                "web1",
+		Confirm:             true,
+		ExpectedFingerprint: "SHA256:NEW",
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("want IsError=false on successful accept, got a tool error result")
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("want exactly 1 content item, got %d", len(result.Content))
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is not *mcp.TextContent: %T", result.Content[0])
+	}
+	var decoded acceptHostKeyOut
+	if err := json.Unmarshal([]byte(text.Text), &decoded); err != nil {
+		t.Fatalf("content text is not valid JSON: %v", err)
+	}
+	if decoded != out {
+		t.Errorf("decoded content = %+v, want %+v", decoded, out)
 	}
 }
 

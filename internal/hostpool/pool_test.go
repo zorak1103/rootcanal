@@ -157,6 +157,27 @@ func TestPool_CapExceeded(t *testing.T) {
 	}
 }
 
+func TestPool_Get_ZeroMaxSessionsPerHost_Unlimited(t *testing.T) {
+	cfg := minCfg(map[string]config.Host{
+		"h": {Address: "h:22", User: "u", KnownHosts: "system", Auth: config.Auth{Type: "agent"}},
+	})
+	cfg.Limits.MaxSessionsPerHost = 0
+	p := New(cfg, &fakeDialer{})
+	t.Cleanup(p.Close)
+
+	// First Get takes the fresh-dial (singleflight) path; second Get finds
+	// the cached entry. Both must succeed when the per-host limit is 0.
+	if _, _, err := p.Get(context.Background(), "h"); err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	if _, _, err := p.Get(context.Background(), "h"); err != nil {
+		t.Fatalf("second Get with MaxSessionsPerHost=0 (unlimited): %v", err)
+	}
+	if p.entries["h"].refs != 2 {
+		t.Errorf("expected refs=2, got %d", p.entries["h"].refs)
+	}
+}
+
 func TestPool_CloseEmpty(t *testing.T) {
 	p := New(minCfg(nil), &fakeDialer{})
 	p.Close() // must not panic
@@ -278,6 +299,55 @@ func TestPool_IdleTimerFires(t *testing.T) {
 	p.mu.Unlock()
 	if exists {
 		t.Error("expected entry to be evicted after idle timeout")
+	}
+}
+
+func TestPool_IdleEviction_StopsKeepalive(t *testing.T) {
+	old := idleTimeout
+	idleTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { idleTimeout = old })
+
+	p := New(minCfg(nil), &fakeDialer{})
+	t.Cleanup(p.Close)
+
+	var stopped atomic.Bool
+	e := &entry{refs: 1, stopKeepalive: func() { stopped.Store(true) }}
+	p.entries["h"] = e
+
+	p.releaseFunc("h", e)() // refs -> 0, starts idle timer
+
+	time.Sleep(60 * time.Millisecond) // wait for timer to fire
+
+	if !stopped.Load() {
+		t.Error("expected stopKeepalive to be called when the idle-evicted entry is removed")
+	}
+}
+
+func TestPool_IdleEviction_ClosesConnection(t *testing.T) {
+	old := idleTimeout
+	idleTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { idleTimeout = old })
+
+	addr, khPath := startSSHServer(t)
+	t.Setenv("TEST_IDLE_CLOSE_PASS", "irrelevant")
+
+	cfg := minCfg(map[string]config.Host{
+		"srv": {Address: addr, User: "u", KnownHosts: khPath,
+			Auth: config.Auth{Type: "password", PasswordEnv: "TEST_IDLE_CLOSE_PASS"}},
+	})
+	p := New(cfg, sshconn.ProdDialer{})
+	t.Cleanup(p.Close)
+
+	client, release, err := p.Get(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	release() // refs -> 0, idle timer starts
+
+	time.Sleep(60 * time.Millisecond) // wait for timer to fire
+
+	if _, err := client.NewSession(); err == nil {
+		t.Error("expected the evicted client's underlying connection to be closed")
 	}
 }
 
