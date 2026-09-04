@@ -95,6 +95,37 @@ jobs:
           retention-days: 30
 
   # ============================================================================
+  # MUTATION TEST - mutest on lines changed vs main (100% kill rate required)
+  # ============================================================================
+  mutation-test:
+    name: Mutation Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # -diff needs origin/main and a merge-base
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52  # v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install mutest
+        # renovate: datasource=go depName=github.com/fchimpan/mutest
+        run: go install github.com/fchimpan/mutest@v0.6.1
+
+      - name: Run mutation testing on changed lines
+        run: task mutate:ci
+
+  # ============================================================================
   # BUILD - Compile binary
   # ============================================================================
   build:

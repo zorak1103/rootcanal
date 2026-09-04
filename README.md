@@ -3,8 +3,7 @@
 [![CI](https://github.com/zorak1103/rootcanal/actions/workflows/ci.yml/badge.svg)](https://github.com/zorak1103/rootcanal/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/zorak1103/rootcanal)](https://github.com/zorak1103/rootcanal/releases)
 [![License](https://img.shields.io/github/license/zorak1103/rootcanal)](https://github.com/zorak1103/rootcanal/blob/main/LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/zorak1103/rootcanal)](https://goreportcard.com/report/github.com/zorak1103/rootcanal)
-[![Go Version](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/go-1.27-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Renovate](https://github.com/zorak1103/rootcanal/actions/workflows/renovate.yml/badge.svg)](https://github.com/zorak1103/rootcanal/actions/workflows/renovate.yml)
 
 **rootcanal** is an SSH MCP server written in Go. It lets an MCP client (Claude Desktop, the Claude CLI, or any MCP host) open persistent shell sessions and perform SFTP file operations on a pre-declared set of remote hosts.
@@ -53,7 +52,7 @@ sudo mv rootcanal /usr/local/bin/
 
 ### Build from source
 
-Requires **Go 1.26+**.
+Requires **Go 1.27+**.
 
 ```sh
 git clone https://github.com/zorak1103/rootcanal.git
