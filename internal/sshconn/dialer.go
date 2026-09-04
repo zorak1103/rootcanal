@@ -62,7 +62,7 @@ func (ProdDialer) Dial(ctx context.Context, h config.Host, limits config.Limits)
 		return nil, fmt.Errorf("SSH handshake failed: %w", err)
 	}
 
-	if limits.DialTimeout > 0 {
+	if limits.DialTimeout > 0 { //mutest:skip equivalent: clearing a deadline that was never set is a no-op on a live conn, so >= behaves identically to >
 		if clearErr := conn.SetDeadline(time.Time{}); clearErr != nil {
 			_ = sshConn.Close()
 			return nil, fmt.Errorf("clearing handshake deadline: %w", clearErr)

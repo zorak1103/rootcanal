@@ -372,6 +372,18 @@ func TestWrite_SizeLimitExceeded(t *testing.T) {
 	}
 }
 
+func TestWrite_SizeExactlyAtLimit_Succeeds(t *testing.T) {
+	cfg := minCfg()
+	cfg.Limits.SFTPMaxWriteBytes = 5
+
+	ffs := newFakeFS()
+	o := newTestOps(cfg, okPool(), ffs)
+	err := o.Write(context.Background(), "h", "/tmp/exact.bin", bytes.Repeat([]byte("x"), 5), 0, false)
+	if err != nil {
+		t.Fatalf("Write at exactly the configured limit should succeed: %v", err)
+	}
+}
+
 func TestWrite_PoolError(t *testing.T) {
 	o := newTestOps(minCfg(), errPool(errors.New("no conn")), newFakeFS())
 	err := o.Write(context.Background(), "h", "/tmp/f", []byte("x"), 0, false)

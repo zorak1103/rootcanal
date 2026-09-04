@@ -36,7 +36,7 @@ func handleGetSkill() func(context.Context, *mcp.CallToolRequest, getSkillIn) (*
 			URI:         m.URI(),
 		})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Slug < entries[j].Slug })
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Slug < entries[j].Slug }) //mutest:skip equivalent: the catalog's slugs are pinned distinct, so <= behaves identically to <
 	slugList := make([]string, len(entries))
 	for i, e := range entries {
 		slugList[i] = e.Slug

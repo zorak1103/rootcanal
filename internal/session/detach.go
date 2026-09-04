@@ -32,7 +32,7 @@ func resolveDetachTimeout(reqMs, maxMs int) int {
 		}
 		return fallback
 	}
-	if reqMs <= 0 || reqMs > maxMs {
+	if reqMs <= 0 || reqMs > maxMs { //mutest:skip equivalent at reqMs==maxMs: both branches return the same integer
 		return maxMs
 	}
 	return reqMs
@@ -136,7 +136,7 @@ func (m *manager) streamDetached(sess *ssh.Session, stdoutPipe, stderrPipe io.Re
 		buf := make([]byte, 4096)
 		for {
 			n, err := stdoutPipe.Read(buf)
-			if n > 0 {
+			if n > 0 { //mutest:skip equivalent: AppendStdout with an empty slice is a content no-op against the real registry
 				reg.AppendStdout(jobID, buf[:n])
 			}
 			if err != nil {
@@ -149,7 +149,7 @@ func (m *manager) streamDetached(sess *ssh.Session, stdoutPipe, stderrPipe io.Re
 		buf := make([]byte, 4096)
 		for {
 			n, err := stderrPipe.Read(buf)
-			if n > 0 {
+			if n > 0 { //mutest:skip equivalent: AppendStderr with an empty slice is a content no-op against the real registry
 				reg.AppendStderr(jobID, buf[:n])
 			}
 			if err != nil {

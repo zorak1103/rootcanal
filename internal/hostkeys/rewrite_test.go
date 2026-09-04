@@ -153,3 +153,42 @@ func TestAppendLine_AddsEntry(t *testing.T) {
 		t.Errorf("appended key not found; file:\n%s", data)
 	}
 }
+
+func TestRewriteLine_LastLineNoTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "known_hosts")
+	// No trailing newline: strings.Split yields exactly 2 elements, so line 2
+	// (the last one) is a legitimate, in-range target.
+	if err := os.WriteFile(khPath, []byte("a\nb"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rewriteLine(khPath, 2, "new"); err != nil {
+		t.Fatalf("rewriteLine: %v", err)
+	}
+
+	data, _ := os.ReadFile(khPath)
+	if string(data) != "a\nnew" {
+		t.Errorf("content = %q, want %q", data, "a\nnew")
+	}
+}
+
+func TestAppendLine_NoTrailingNewline_DoesNotCorruptLastEntry(t *testing.T) {
+	dir := t.TempDir()
+	key := newTestKey(t)
+	khPath := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(khPath, []byte("abc"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	newLine := knownhosts.Line([]string{"newhost"}, key)
+	if err := appendLine(khPath, newLine); err != nil {
+		t.Fatalf("appendLine: %v", err)
+	}
+
+	data, _ := os.ReadFile(khPath)
+	want := "abc\n" + newLine + "\n"
+	if string(data) != want {
+		t.Errorf("content = %q, want %q (the pre-existing entry must survive intact)", data, want)
+	}
+}

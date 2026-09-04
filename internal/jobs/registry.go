@@ -63,7 +63,7 @@ func (j *Job) StdoutTail(n int) string {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	b := j.stdout
-	if len(b) > n {
+	if len(b) > n { //mutest:skip equivalent at len(b)==n: b[len(b)-n:] == b, an identity re-slice
 		b = b[len(b)-n:]
 	}
 	return string(b)
@@ -74,7 +74,7 @@ func (j *Job) StderrTail(n int) string {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	b := j.stderr
-	if len(b) > n {
+	if len(b) > n { //mutest:skip equivalent at len(b)==n: b[len(b)-n:] == b, an identity re-slice
 		b = b[len(b)-n:]
 	}
 	return string(b)
@@ -82,7 +82,7 @@ func (j *Job) StderrTail(n int) string {
 
 func appendCapped(buf, data []byte) []byte {
 	buf = append(buf, data...)
-	if len(buf) > tailCap {
+	if len(buf) > tailCap { //mutest:skip equivalent at len(buf)==tailCap: buf[len(buf)-tailCap:] == buf, an identity re-slice
 		buf = buf[len(buf)-tailCap:]
 	}
 	return buf

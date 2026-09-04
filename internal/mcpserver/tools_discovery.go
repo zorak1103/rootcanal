@@ -45,7 +45,7 @@ func handleListHosts(cfg *config.Config) func(context.Context, *mcp.CallToolRequ
 				SFTPAllowedPrefixes: prefixes,
 			})
 		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name }) //mutest:skip equivalent: entries are built from map keys, so Name is always unique — <= behaves identically to <
 		out := listHostsOut{Hosts: entries}
 		b, err := json.Marshal(out)
 		if err != nil {

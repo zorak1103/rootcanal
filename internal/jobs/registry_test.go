@@ -79,6 +79,17 @@ func TestRegistry_MaxJobs_RejectsWhenFull(t *testing.T) {
 	}
 }
 
+func TestRegistry_MaxJobsZero_Unlimited(t *testing.T) {
+	reg := jobs.NewRegistry(0, time.Minute)
+	defer reg.Close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := reg.TryRegister("h", "c", i); err != nil {
+			t.Fatalf("TryRegister #%d with maxJobs=0 (unlimited): %v", i, err)
+		}
+	}
+}
+
 func TestRegistry_AppendOutputAndTail(t *testing.T) {
 	reg := jobs.NewRegistry(10, time.Minute)
 	defer reg.Close()

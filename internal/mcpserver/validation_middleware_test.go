@@ -41,6 +41,7 @@ func TestSuggestField(t *testing.T) {
 		{"commnd", "command"}, // 2 edits away
 		{"xyzzy", ""},         // no match within threshold
 		{"host", "host"},      // exact match
+		{"hostname", ""},      // 4 edits away from "host" — outside the <4 threshold
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -49,6 +50,15 @@ func TestSuggestField(t *testing.T) {
 				t.Errorf("suggestField(%q, %v) = %q, want %q", tt.input, known, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSuggestField_TiePrefersFirstMatch(t *testing.T) {
+	// "hat" is edit distance 1 from both "cat" and "bat" (single substitution).
+	// On a tie, suggestField must keep the first candidate seen, not the last.
+	known := []string{"cat", "bat"}
+	if got := suggestField("hat", known); got != "cat" {
+		t.Errorf("suggestField(%q, %v) = %q, want %q (first equidistant match)", "hat", known, got, "cat")
 	}
 }
 

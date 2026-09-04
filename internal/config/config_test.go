@@ -692,6 +692,43 @@ func TestApplyDefaults_NewV2Fields(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_AllLimitDefaults(t *testing.T) {
+	tests := []struct {
+		name string
+		get  func(Limits) any
+		want any
+	}{
+		{"MaxSessionsTotal", func(l Limits) any { return l.MaxSessionsTotal }, defaultMaxSessionsTotal},
+		{"MaxSessionsPerHost", func(l Limits) any { return l.MaxSessionsPerHost }, defaultMaxSessionsPerHost},
+		{"DefaultIdleTimeout", func(l Limits) any { return l.DefaultIdleTimeout }, defaultIdleTimeout},
+		{"MaxSessionAge", func(l Limits) any { return l.MaxSessionAge }, defaultMaxSessionAge},
+		{"OutputBufferBytes", func(l Limits) any { return l.OutputBufferBytes }, defaultOutputBufferBytes},
+		{"DialTimeout", func(l Limits) any { return l.DialTimeout }, defaultDialTimeout},
+		{"DefaultSendTimeoutMs", func(l Limits) any { return l.DefaultSendTimeoutMs }, defaultSendTimeoutMs},
+		{"MaxSendTimeoutMs", func(l Limits) any { return l.MaxSendTimeoutMs }, defaultMaxSendTimeoutMs},
+		{"SFTPMaxReadBytes", func(l Limits) any { return l.SFTPMaxReadBytes }, defaultSFTPMaxReadBytes},
+		{"SFTPMaxWriteBytes", func(l Limits) any { return l.SFTPMaxWriteBytes }, defaultSFTPMaxWriteBytes},
+		{"RunOnceMaxBytes", func(l Limits) any { return l.RunOnceMaxBytes }, defaultRunOnceMaxBytes},
+		{"RunOnceMaxTimeoutMs", func(l Limits) any { return l.RunOnceMaxTimeoutMs }, defaultRunOnceMaxTimeoutMs},
+		{"MaxRunOnceConcurrent", func(l Limits) any { return l.MaxRunOnceConcurrent }, defaultMaxRunOnceConcurrent},
+		{"DefaultKeepaliveInterval", func(l Limits) any { return l.DefaultKeepaliveInterval }, defaultKeepaliveInterval},
+		{"DefaultKeepaliveMaxFailures", func(l Limits) any { return l.DefaultKeepaliveMaxFailures }, defaultKeepaliveMaxFailures},
+		{"JobTTL", func(l Limits) any { return l.JobTTL }, defaultJobTTL},
+		{"MaxJobs", func(l Limits) any { return l.MaxJobs }, defaultMaxJobs},
+		{"DetachMaxDurationMs", func(l Limits) any { return l.DetachMaxDurationMs }, defaultDetachMaxDurationMs},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			applyDefaults(cfg)
+			if got := tc.get(cfg.Limits); got != tc.want {
+				t.Errorf("%s = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCapabilities_TermAndCleanOutput(t *testing.T) {
 	clean := true
 	cfg := &Config{

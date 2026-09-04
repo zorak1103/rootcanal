@@ -200,7 +200,7 @@ func (o *ops) Read(ctx context.Context, host, p string, maxBytes int) (data []by
 	defer f.Close()
 
 	limit := o.cfg.Limits.SFTPMaxReadBytes
-	if maxBytes > 0 && maxBytes < limit {
+	if maxBytes > 0 && maxBytes < limit { //mutest:skip equivalent at maxBytes==limit: limit=maxBytes is a self-assignment, so <= behaves identically to <
 		limit = maxBytes
 	}
 

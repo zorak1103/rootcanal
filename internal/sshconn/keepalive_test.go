@@ -112,3 +112,18 @@ func TestStartKeepalive_OnDead_NilIsSafe(t *testing.T) {
 		t.Error("client should be closed after maxFailures even with nil onDead")
 	}
 }
+
+func TestKeepaliveTick_ClosesExactlyAtMaxFailures(t *testing.T) {
+	fake := &fakeKeepaliveClient{sendErr: errors.New("connection reset")}
+	consecutive := 0
+
+	// First failure: consecutive becomes 1, which is not < maxFailures=1, so
+	// this call must close the connection immediately — not on some later call.
+	dead := keepaliveTick(fake, nil, nil, 1, &consecutive)
+	if !dead {
+		t.Fatal("expected keepaliveTick to report the connection dead on the first failure when maxFailures=1")
+	}
+	if !fake.closed.Load() {
+		t.Error("expected client to be closed when consecutive failures reach maxFailures")
+	}
+}

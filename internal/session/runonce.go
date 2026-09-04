@@ -38,6 +38,15 @@ func resolveRunTimeout(reqMs, maxMs int) (timeoutMs int, warning string) {
 	return timeoutMs, warning
 }
 
+// effectiveRunOnceCap returns the effective per-stream byte cap for RunOnce
+// output, falling back to a 1 MiB default when configuredMax is unset.
+func effectiveRunOnceCap(configuredMax int64) int64 {
+	if configuredMax <= 0 {
+		return 1 << 20
+	}
+	return configuredMax
+}
+
 // runWithDeadline executes cmd on sess and waits for it to finish or runCtx
 // to expire. If the deadline fires, the process may have already exited and
 // the SSH library may still be draining buffered output (issue #15); this
@@ -130,8 +139,10 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	defer c.mu.Unlock()
 	orig := len(p)
 	remaining := c.cap - c.written
-	if remaining <= 0 {
-		c.truncated = true
+	if remaining <= 0 { //mutest:skip equivalent: remaining is pinned at exactly 0 once full (never negative), and the fallthrough path (slice to 0 bytes, write nothing) reproduces the same truncated flag and return value for every orig
+		if orig > 0 {
+			c.truncated = true
+		}
 		return orig, nil
 	}
 	if int64(orig) > remaining {
@@ -196,10 +207,7 @@ func (m *manager) RunOnce(ctx context.Context, host string, in RunOnceInput) (Ru
 		}
 	}
 
-	maxBytes := m.cfg.Limits.RunOnceMaxBytes
-	if maxBytes <= 0 {
-		maxBytes = 1 << 20
-	}
+	maxBytes := effectiveRunOnceCap(m.cfg.Limits.RunOnceMaxBytes)
 
 	stdout := &cappedBuffer{cap: maxBytes}
 	stderr := &cappedBuffer{cap: maxBytes}
