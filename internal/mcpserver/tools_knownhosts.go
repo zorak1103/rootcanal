@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/zorak1103/rootcanal/internal/hostkeys"
@@ -16,13 +17,14 @@ type acceptHostKeyIn struct {
 }
 
 type acceptHostKeyOut struct {
-	Host               string `json:"host"`
-	CurrentFingerprint string `json:"current_fingerprint,omitempty"`
-	NewFingerprint     string `json:"new_fingerprint,omitempty"`
-	Changed            bool   `json:"changed,omitempty"`
-	KnownHosts         string `json:"known_hosts,omitempty"`
-	Refreshed          bool   `json:"refreshed,omitempty"`
-	Message            string `json:"message,omitempty"`
+	Host               string                `json:"host"`
+	CurrentFingerprint string                `json:"current_fingerprint,omitempty"`
+	NewFingerprint     string                `json:"new_fingerprint,omitempty"`
+	Changed            bool                  `json:"changed,omitempty"`
+	KnownHosts         string                `json:"known_hosts,omitempty"`
+	Refreshed          bool                  `json:"refreshed,omitempty"`
+	StaleEntries       []hostkeys.StaleEntry `json:"stale_entries,omitempty"`
+	Message            string                `json:"message,omitempty"`
 }
 
 func handleAcceptHostKey(hk hostkeys.Refresher) func(context.Context, *mcp.CallToolRequest, acceptHostKeyIn) (*mcp.CallToolResult, acceptHostKeyOut, error) {
@@ -53,7 +55,18 @@ func handleAcceptHostKey(hk hostkeys.Refresher) func(context.Context, *mcp.CallT
 			return r, acceptHostKeyOut{}, nil
 		}
 		var msg string
-		if res.Changed {
+		switch {
+		case len(res.StaleEntries) > 0:
+			descs := make([]string, len(res.StaleEntries))
+			for i, e := range res.StaleEntries {
+				descs[i] = fmt.Sprintf("line %d (%s, %s)", e.Line, e.Type, e.Fingerprint)
+			}
+			msg = fmt.Sprintf(
+				"known_hosts has ambiguous entries for %q that must be resolved before this key can be "+
+					"trusted: %s. Remove the stale entries (e.g. \"ssh-keygen -R <hostport> -f <known_hosts "+
+					"path>\") and re-run ssh_accept_host_key — confirm=true will fail until then.",
+				in.Host, strings.Join(descs, "; "))
+		case res.Changed:
 			msg = fmt.Sprintf(
 				"Host key has changed. Before proceeding, verify the new fingerprint %q for %q "+
 					"OUT-OF-BAND — e.g. against the hosting provider's console, a config-management "+
@@ -61,7 +74,13 @@ func handleAcceptHostKey(hk hostkeys.Refresher) func(context.Context, *mcp.CallT
 					"rule out a man-in-the-middle. Once independently verified, call ssh_accept_host_key "+
 					"again with confirm=true and expected_fingerprint=%q.",
 				res.NewFP, in.Host, res.NewFP)
-		} else {
+		case res.CurrentFP == "":
+			msg = fmt.Sprintf(
+				"No known_hosts entry exists yet for %q. Before trusting %q, verify it OUT-OF-BAND — e.g. "+
+					"against the hosting provider's console or by contacting whoever provisioned the host. "+
+					"Once verified, call ssh_accept_host_key again with confirm=true and expected_fingerprint=%q.",
+				in.Host, res.NewFP, res.NewFP)
+		default:
 			msg = "Host key matches the stored entry; no update is needed."
 		}
 		out := acceptHostKeyOut{
@@ -70,6 +89,7 @@ func handleAcceptHostKey(hk hostkeys.Refresher) func(context.Context, *mcp.CallT
 			NewFingerprint:     res.NewFP,
 			Changed:            res.Changed,
 			KnownHosts:         res.KnownHosts,
+			StaleEntries:       res.StaleEntries,
 			Message:            msg,
 		}
 		b, err := json.Marshal(out)
