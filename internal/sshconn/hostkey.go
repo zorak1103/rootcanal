@@ -32,11 +32,7 @@ func hostKeyCallback(h *config.Host, hostport string) (ssh.HostKeyCallback, []st
 // It probes the callback with a dummy key; knownhosts responds with a KeyError
 // whose Want field lists every known key for that address.
 func knownHostAlgorithms(cb ssh.HostKeyCallback, hostport string) []string {
-	addr, _ := net.ResolveTCPAddr("tcp", hostport)
-	if addr == nil {
-		addr = &net.TCPAddr{}
-	}
-	err := cb(hostport, addr, dummyKey{})
+	err := cb(hostport, ProbeAddr(hostport), dummyKey{})
 	var kerr *knownhosts.KeyError
 	if !errors.As(err, &kerr) || len(kerr.Want) == 0 {
 		return nil
@@ -50,6 +46,18 @@ func knownHostAlgorithms(cb ssh.HostKeyCallback, hostport string) []string {
 		}
 	}
 	return algos
+}
+
+// ProbeAddr resolves hostport for use as the remote address in a known_hosts
+// probe. It never returns nil: on resolve failure it falls back to a zero
+// TCPAddr, because knownhosts calls remote.String() and a nil *net.TCPAddr
+// stringifies to "<nil>", which fails SplitHostPort and degrades the probe to a
+// plain error instead of the KeyError the caller needs.
+func ProbeAddr(hostport string) net.Addr {
+	if addr, _ := net.ResolveTCPAddr("tcp", hostport); addr != nil {
+		return addr
+	}
+	return &net.TCPAddr{}
 }
 
 // dummyKey is a minimal ssh.PublicKey used only to trigger knownhosts.KeyError.

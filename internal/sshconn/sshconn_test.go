@@ -123,6 +123,20 @@ func TestResolveKnownHosts(t *testing.T) {
 	}
 }
 
+// unresolvableHostport fails net.ResolveTCPAddr with zero network I/O: the
+// port is out of range, and ResolveTCPAddr rejects the port before it ever
+// looks up the host. Do not "simplify" this to a normal host:port — the
+// nil-addr fallback in ProbeAddr is only reachable when resolution fails, and
+// a resolvable value makes these tests pass while covering nothing.
+const unresolvableHostport = "testhost:99999"
+
+func TestUnresolvableHostport_Precondition(t *testing.T) {
+	if _, err := net.ResolveTCPAddr("tcp", unresolvableHostport); err == nil {
+		t.Fatalf("%q must not resolve — the nil-addr fallback tests cover nothing if it does",
+			unresolvableHostport)
+	}
+}
+
 func TestKnownHostAlgorithms_UnresolvableHost(t *testing.T) {
 	dir := t.TempDir()
 	khPath := filepath.Join(dir, "known_hosts")
@@ -135,8 +149,7 @@ func TestKnownHostAlgorithms_UnresolvableHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostport := "unresolvable.invalid:22"
-	line := knownhosts.Line([]string{knownhosts.Normalize(hostport)}, signer.PublicKey())
+	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, signer.PublicKey())
 	if err := os.WriteFile(khPath, []byte(line+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -146,10 +159,29 @@ func TestKnownHostAlgorithms_UnresolvableHost(t *testing.T) {
 		t.Fatalf("knownhosts.New: %v", err)
 	}
 
-	algos := knownHostAlgorithms(cb, hostport)
+	algos := knownHostAlgorithms(cb, unresolvableHostport)
 	want := []string{signer.PublicKey().Type()}
 	if len(algos) != len(want) || algos[0] != want[0] {
 		t.Errorf("knownHostAlgorithms() = %v, want %v", algos, want)
+	}
+}
+
+func TestProbeAddr_UnresolvableHost_ReturnsZeroAddr(t *testing.T) {
+	addr := ProbeAddr(unresolvableHostport)
+	if addr == nil {
+		t.Fatal("ProbeAddr() = nil, want a non-nil zero TCPAddr fallback")
+	}
+	if got, ok := addr.(*net.TCPAddr); !ok || got.IP != nil || got.Port != 0 {
+		t.Errorf("ProbeAddr() = %#v, want a zero-value *net.TCPAddr", addr)
+	}
+}
+
+func TestProbeAddr_ResolvableHost_ReturnsResolvedAddr(t *testing.T) {
+	addr := ProbeAddr("127.0.0.1:22")
+	want := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}
+	got, ok := addr.(*net.TCPAddr)
+	if !ok || !got.IP.Equal(want.IP) || got.Port != want.Port {
+		t.Errorf("ProbeAddr() = %#v, want %#v", addr, want)
 	}
 }
 
