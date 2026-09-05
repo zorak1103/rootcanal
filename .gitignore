@@ -9,3 +9,7 @@
 .claude/*
 !.claude/skills
 CLAUDE.local.md
+.zvec-grep
+
+# Test & Mutation reports
+reports/

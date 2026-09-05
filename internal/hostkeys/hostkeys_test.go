@@ -64,11 +64,12 @@ func TestStoredFingerprint_MalformedHostport_ReturnsEmpty(t *testing.T) {
 	khPath := writeKnownHostsAt(t, dir, unresolvableHostport, storedKey)
 
 	// A probe failure (malformed hostport, no colon) must be indistinguishable
-	// from "not stored" here — storedFingerprint is read-only, used by Inspect
-	// to report a fingerprint, so "" is the correct degraded answer. Only the
-	// write path (rewriteKnownHostsEntry, via findStoredKeyLine) must not make
-	// this same conflation, since there it would cause a duplicate-append.
-	fp := storedFingerprint(khPath, "nohostport", storedKey.Type())
+	// from "not stored" here — storedFingerprint is used only by Accept, where
+	// a "" result still leads to a safe outcome: rewriteKnownHostsEntry redoes
+	// the same probe and errors out for real before any write happens. Inspect
+	// does not use storedFingerprint for exactly this reason — see
+	// TestInspect_ProbeFails.
+	fp := storedFingerprint(khPath, malformedHostport, storedKey.Type())
 	if fp != "" {
 		t.Errorf("expected empty fingerprint for a malformed hostport, got %q", fp)
 	}
@@ -215,6 +216,26 @@ func TestInspect_NoStoredKeyOfType(t *testing.T) {
 	}
 	if !res.Changed {
 		t.Error("want Changed=true when no stored entry exists")
+	}
+}
+
+func TestInspect_ProbeFails(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := writeKnownHostsAt(t, dir, unresolvableHostport, storedKey)
+	liveKey := newTestKey(t)
+
+	host := fakeHost(khPath, true)
+	host.Address = malformedHostport // no colon: probeStoredKey errors, doesn't return "not stored"
+	cfg := makeCfg(host)
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	// A probe failure must surface as an error, never as CurrentFP=="" with
+	// Changed=true — that combination reads as "no key stored, safe to trust",
+	// which is exactly the wrong signal to hand an operator (or the LLM driving
+	// ssh_accept_host_key) deciding whether to confirm a host key change.
+	if _, err := r.Inspect(context.Background(), testHostName); err == nil {
+		t.Fatal("expected error when the known_hosts probe fails, not a degraded success result")
 	}
 }
 
