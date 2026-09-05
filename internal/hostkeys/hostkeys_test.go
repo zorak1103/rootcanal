@@ -3,6 +3,7 @@ package hostkeys
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +41,73 @@ func TestProbeKey_TypeAndVerify(t *testing.T) {
 	}
 }
 
+func TestProbeStoredEntries_UnresolvableHost(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := writeKnownHostsAt(t, dir, probeHostport, storedKey)
+
+	entries, err := probeStoredEntries(khPath, probeHostport)
+	if err != nil {
+		t.Fatalf("probeStoredEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("probeStoredEntries() returned %d entries, want 1", len(entries))
+	}
+	wantFP := ssh.FingerprintSHA256(storedKey)
+	if got := ssh.FingerprintSHA256(entries[0].Key); got != wantFP {
+		t.Errorf("probeStoredEntries() key fingerprint = %q, want %q", got, wantFP)
+	}
+}
+
+// TestAccept_MissingKnownHosts_ErrorMentionsCreate pins that a missing
+// known_hosts file is reported as a distinct, actionable state — not folded
+// into the generic "probe failed" error. rootcanal will not create the
+// operator's trust store, and the only config value that reaches this with
+// no os.Stat performed at load time is known_hosts: "system" on a machine
+// that has never run ssh — the operator needs to be told to create the file,
+// not left guessing why confirm=true refuses to bootstrap it.
+func TestAccept_MissingKnownHosts_ErrorMentionsCreate(t *testing.T) {
+	liveKey := newTestKey(t)
+	host := fakeHost(filepath.Join(t.TempDir(), "missing"), true)
+	cfg := makeCfg(host)
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	_, err := r.Accept(context.Background(), testHostName, ssh.FingerprintSHA256(liveKey))
+	if err == nil {
+		t.Fatal("expected error when known_hosts does not exist")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %q, want it to mention the file does not exist", err.Error())
+	}
+}
+
+func TestAccept_ProbeFails_MalformedHostport_LeavesFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := writeKnownHostsAt(t, dir, probeHostport, storedKey)
+	liveKey := newTestKey(t)
+
+	host := fakeHost(khPath, true)
+	host.Address = malformedHostport // no colon: probeStoredEntries errors, doesn't return "not stored"
+	cfg := makeCfg(host)
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	before, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Accept(context.Background(), testHostName, ssh.FingerprintSHA256(liveKey)); err == nil {
+		t.Fatal("expected error when the known_hosts probe fails, not a degraded write")
+	}
+	after, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("file was modified on probe failure: got %q, want unchanged %q", after, before)
+	}
+}
+
 // --- helpers ---
 
 func newTestKey(t *testing.T) ssh.PublicKey {
@@ -54,6 +123,23 @@ func newTestKey(t *testing.T) ssh.PublicKey {
 	return pub
 }
 
+// newTestKeyEd25519 returns a key of a different type than newTestKey's
+// ecdsa-sha2-nistp256 — needed to exercise the "stored entry is a different
+// key type than the live key" path, which every other test in this file
+// can't reach because it only ever uses one key type.
+func newTestKeyEd25519(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sshPub
+}
+
 // testHostport is the address used consistently across this file's fake
 // hosts, known_hosts entries, and probes.
 const testHostport = "127.0.0.1:2222"
@@ -62,14 +148,19 @@ const testHostport = "127.0.0.1:2222"
 // file's fake configs.
 const testHostName = "web1"
 
-func writeKnownHosts(t *testing.T, dir string, key ssh.PublicKey) string {
+func writeKnownHostsAt(t *testing.T, dir, hostport string, key ssh.PublicKey) string {
 	t.Helper()
 	path := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize(testHostport)}, key)
+	line := knownhosts.Line([]string{knownhosts.Normalize(hostport)}, key)
 	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeKnownHosts(t *testing.T, dir string, key ssh.PublicKey) string {
+	t.Helper()
+	return writeKnownHostsAt(t, dir, testHostport, key)
 }
 
 func fakeHost(khPath string, allow bool) config.Host {
@@ -156,7 +247,7 @@ func TestInspect_UnknownHost(t *testing.T) {
 	}
 }
 
-func TestInspect_NoStoredKeyOfType(t *testing.T) {
+func TestInspect_NothingStored(t *testing.T) {
 	dir := t.TempDir()
 	khPath := filepath.Join(dir, "known_hosts")
 	if err := os.WriteFile(khPath, []byte(""), 0600); err != nil {
@@ -173,8 +264,65 @@ func TestInspect_NoStoredKeyOfType(t *testing.T) {
 	if res.CurrentFP != "" {
 		t.Errorf("CurrentFP should be empty when no stored entry; got %q", res.CurrentFP)
 	}
-	if !res.Changed {
-		t.Error("want Changed=true when no stored entry exists")
+	// Changed reports a rotation of a previously-trusted key, not "there was
+	// never anything to compare against" — those are different states an
+	// operator needs to tell apart (see the "no entry stored" vs "host key has
+	// changed" messages in tools_knownhosts.go).
+	if res.Changed {
+		t.Error("want Changed=false when nothing was ever stored")
+	}
+	if len(res.StaleEntries) != 0 {
+		t.Errorf("want no stale entries when known_hosts is empty; got %+v", res.StaleEntries)
+	}
+}
+
+// TestInspect_DifferentKeyTypeStored_ReportsStaleEntry pins that a stored
+// entry of a different key type than the live key is reported as a stale
+// entry, not silently treated as "nothing stored" — the latter would make
+// Accept append the live key alongside the old one, leaving both trusted.
+func TestInspect_DifferentKeyTypeStored_ReportsStaleEntry(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t) // ecdsa-sha2-nistp256
+	khPath := writeKnownHosts(t, dir, storedKey)
+	liveKey := newTestKeyEd25519(t)
+	cfg := makeCfg(fakeHost(khPath, true))
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	res, err := r.Inspect(context.Background(), "web1")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if res.CurrentFP != "" {
+		t.Errorf("CurrentFP should be empty when the stored entry is a different key type; got %q", res.CurrentFP)
+	}
+	if res.Changed {
+		t.Error("want Changed=false when the stored entry is a different key type (it's stale, not superseded)")
+	}
+	if len(res.StaleEntries) != 1 {
+		t.Fatalf("want exactly 1 stale entry, got %+v", res.StaleEntries)
+	}
+	if res.StaleEntries[0].Type != storedKey.Type() {
+		t.Errorf("stale entry type = %q, want %q", res.StaleEntries[0].Type, storedKey.Type())
+	}
+}
+
+func TestInspect_ProbeFails(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := writeKnownHostsAt(t, dir, probeHostport, storedKey)
+	liveKey := newTestKey(t)
+
+	host := fakeHost(khPath, true)
+	host.Address = malformedHostport // no colon: probeStoredEntries errors, doesn't return "not stored"
+	cfg := makeCfg(host)
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	// A probe failure must surface as an error, never as CurrentFP=="" with
+	// Changed=true — that combination reads as "no key stored, safe to trust",
+	// which is exactly the wrong signal to hand an operator (or the LLM driving
+	// ssh_accept_host_key) deciding whether to confirm a host key change.
+	if _, err := r.Inspect(context.Background(), testHostName); err == nil {
+		t.Fatal("expected error when the known_hosts probe fails, not a degraded success result")
 	}
 }
 
@@ -264,6 +412,68 @@ func TestAccept_FingerprintMismatch(t *testing.T) {
 	_, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(storedKey))
 	if err == nil {
 		t.Fatal("expected error when expected_fingerprint doesn't match live key")
+	}
+}
+
+// TestAccept_DuplicateSameTypeEntries_Errors is the regression test for the
+// exact state main's append-on-probe-failure bug used to leave behind: two
+// stored entries of the same type for one host. Accept must refuse to guess
+// which one is superseded rather than rewriting the first and leaving the
+// second trusted.
+func TestAccept_DuplicateSameTypeEntries_Errors(t *testing.T) {
+	dir := t.TempDir()
+	key1 := newTestKey(t)
+	key2 := newTestKey(t)
+	liveKey := newTestKey(t)
+	line1 := knownhosts.Line([]string{knownhosts.Normalize(testHostport)}, key1)
+	line2 := knownhosts.Line([]string{knownhosts.Normalize(testHostport)}, key2)
+	khPath := filepath.Join(dir, "known_hosts")
+	original := line1 + "\n" + line2 + "\n"
+	if err := os.WriteFile(khPath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := makeCfg(fakeHost(khPath, true))
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	_, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(liveKey))
+	if err == nil {
+		t.Fatal("expected error when known_hosts has duplicate entries for the host")
+	}
+
+	after, readErr := os.ReadFile(khPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != original {
+		t.Errorf("file was modified on ambiguous duplicate entries: got %q, want unchanged %q", after, original)
+	}
+}
+
+// TestAccept_DifferentKeyTypeStored_Errors is the regression test for a
+// stored entry of a different key type than the live key: Accept must refuse
+// rather than append, which would leave the old (possibly attacker-controlled,
+// post-rebuild) key trusted alongside the new one.
+func TestAccept_DifferentKeyTypeStored_Errors(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t) // ecdsa-sha2-nistp256
+	khPath := writeKnownHosts(t, dir, storedKey)
+	liveKey := newTestKeyEd25519(t)
+	cfg := makeCfg(fakeHost(khPath, true))
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	before, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Accept(context.Background(), "web1", ssh.FingerprintSHA256(liveKey)); err == nil {
+		t.Fatal("expected error when the stored entry is a different key type")
+	}
+	after, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("file was modified on key-type mismatch: got %q, want unchanged %q", after, before)
 	}
 }
 

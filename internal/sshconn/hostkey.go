@@ -32,11 +32,7 @@ func hostKeyCallback(h *config.Host, hostport string) (ssh.HostKeyCallback, []st
 // It probes the callback with a dummy key; knownhosts responds with a KeyError
 // whose Want field lists every known key for that address.
 func knownHostAlgorithms(cb ssh.HostKeyCallback, hostport string) []string {
-	addr, _ := net.ResolveTCPAddr("tcp", hostport)
-	if addr == nil {
-		addr = &net.TCPAddr{}
-	}
-	err := cb(hostport, addr, dummyKey{})
+	err := cb(hostport, ProbeRemote(), dummyKey{})
 	var kerr *knownhosts.KeyError
 	if !errors.As(err, &kerr) || len(kerr.Want) == 0 {
 		return nil
@@ -50,6 +46,22 @@ func knownHostAlgorithms(cb ssh.HostKeyCallback, hostport string) []string {
 		}
 	}
 	return algos
+}
+
+// ProbeRemote returns the fake remote address passed to a
+// knownhosts.HostKeyCallback during a known_hosts probe. knownhosts.hostKeyDB.check
+// always calls remote.String() and requires it to parse via net.SplitHostPort
+// before it even looks at the callback's address argument; only once that
+// parses does it prefer address over the parsed remote whenever address is
+// non-empty. Since config.normalizeAddress (internal/config/validate.go) runs
+// every Host.Address through net.JoinHostPort at load time, hostport here is
+// never "" and the parsed remote is always discarded in favor of it — so
+// resolving hostport would be wasted, uncancellable work for a value nothing
+// reads. A zero *net.TCPAddr stringifies to ":0", which parses; a nil
+// *net.TCPAddr would stringify to "<nil>", which does not, degrading the probe
+// to a plain error instead of the KeyError callers need.
+func ProbeRemote() net.Addr {
+	return &net.TCPAddr{}
 }
 
 // dummyKey is a minimal ssh.PublicKey used only to trigger knownhosts.KeyError.

@@ -1,9 +1,9 @@
 package hostkeys
 
 import (
-	"errors"
+	"bytes"
+	"encoding/base64"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,47 +12,63 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// rewriteKnownHostsEntry finds the stored line for liveKey.Type() at hostport
-// and replaces it. Appends a new line if no entry of that type is stored.
-func rewriteKnownHostsEntry(path, hostport string, liveKey ssh.PublicKey) error {
-	lineNum, err := findStoredKeyLine(path, hostport, liveKey.Type())
-	if err != nil {
-		return err
-	}
-	newLine := knownhosts.Line([]string{knownhosts.Normalize(hostport)}, liveKey)
+// writeKnownHostsEntry writes liveKey into path at lineNum, or appends a new
+// line when lineNum is 0 (selectTarget found nothing stored for hostport).
+// expect is the key selectTarget saw at that line when it decided to rewrite
+// (nil when appending); rewriteKnownHostsLine verifies it is still there
+// before writing.
+func writeKnownHostsEntry(path, hostport string, liveKey ssh.PublicKey, lineNum int, expect ssh.PublicKey) error {
 	if lineNum == 0 {
+		newLine := knownhosts.Line([]string{knownhosts.Normalize(hostport)}, liveKey)
 		return appendLine(path, newLine)
 	}
-	return rewriteLine(path, lineNum, newLine)
+	return rewriteKnownHostsLine(path, lineNum, liveKey, expect)
 }
 
-// findStoredKeyLine probes path for a stored entry of keyType at hostport and
-// returns its 1-indexed line number. Returns 0 if not found (caller will append).
-func findStoredKeyLine(path, hostport, keyType string) (int, error) {
-	cb, err := knownhosts.New(path)
-	if err != nil {
-		return 0, fmt.Errorf("loading known_hosts %q: %w", path, err)
-	}
-	addr, _ := net.ResolveTCPAddr("tcp", hostport)
-	if addr == nil {
-		addr = &net.TCPAddr{}
-	}
-	probeErr := cb(hostport, addr, probeKey{})
-	var kerr *knownhosts.KeyError
-	if !errors.As(probeErr, &kerr) {
-		return 0, nil
-	}
-	for _, kk := range kerr.Want {
-		if kk.Key.Type() == keyType {
-			return kk.Line, nil
+// rewriteKnownHostsLine replaces the key portion of the 1-indexed lineNum in
+// path with liveKey, preserving the line's existing host-pattern field —
+// hostname/IP alias list or a hashed "|1|salt|hash" pattern — rather than
+// regenerating it from a hostport, which would silently drop aliases or
+// de-hash a hashed known_hosts file.
+//
+// It refuses to rewrite a line whose current key does not match expect: the
+// probe that chose this line and this write are two separate reads of the
+// file, and a mismatch means something changed the line in between (a
+// concurrent ssh_accept_host_key call, a manual ssh-keygen -R) — writing
+// anyway could land liveKey on an entry for a different, unrelated key.
+// It also refuses "@cert-authority"/"@revoked" marker lines, whose semantics
+// a plain key-portion rewrite would silently change.
+func rewriteKnownHostsLine(path string, lineNum int, liveKey, expect ssh.PublicKey) error {
+	return writeLineAt(path, lineNum, func(oldLine string) (string, error) {
+		fields := strings.Fields(oldLine)
+		if len(fields) < 3 {
+			return "", fmt.Errorf("known_hosts %q line %d: malformed entry", path, lineNum)
 		}
-	}
-	return 0, nil
+		if strings.HasPrefix(fields[0], "@") {
+			return "", fmt.Errorf("known_hosts %q line %d: refusing to rewrite a %q marker line", path, lineNum, fields[0])
+		}
+		parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(fields[1] + " " + fields[2]))
+		if err != nil {
+			return "", fmt.Errorf("known_hosts %q line %d: parsing existing key: %w", path, lineNum, err)
+		}
+		if expect == nil || !bytes.Equal(parsed.Marshal(), expect.Marshal()) {
+			return "", fmt.Errorf("known_hosts %q line %d changed since it was read; refusing to overwrite — retry", path, lineNum)
+		}
+		return fields[0] + " " + liveKey.Type() + " " + base64.StdEncoding.EncodeToString(liveKey.Marshal()), nil
+	})
 }
 
 // rewriteLine replaces the 1-indexed lineNum in path with newLine atomically.
 // All other lines are preserved byte-for-byte.
 func rewriteLine(path string, lineNum int, newLine string) error {
+	return writeLineAt(path, lineNum, func(string) (string, error) {
+		return newLine, nil
+	})
+}
+
+// writeLineAt replaces the 1-indexed lineNum in path with the result of
+// transform(oldLine), atomically. All other lines are preserved byte-for-byte.
+func writeLineAt(path string, lineNum int, transform func(oldLine string) (string, error)) error {
 	data, err := os.ReadFile(path) // #nosec G304 — operator-controlled known_hosts path
 	if err != nil {
 		return fmt.Errorf("reading %q: %w", path, err)
@@ -60,6 +76,10 @@ func rewriteLine(path string, lineNum int, newLine string) error {
 	lines := strings.Split(string(data), "\n")
 	if lineNum < 1 || lineNum > len(lines) {
 		return fmt.Errorf("line %d out of range (file has %d lines)", lineNum, len(lines))
+	}
+	newLine, err := transform(lines[lineNum-1])
+	if err != nil {
+		return err
 	}
 	lines[lineNum-1] = newLine
 	return atomicWrite(path, strings.Join(lines, "\n"))
