@@ -42,16 +42,35 @@ func TestProbeKey_TypeAndVerify(t *testing.T) {
 func TestStoredFingerprint_UnresolvableHost(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t)
-	khPath := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, storedKey)
-	if err := os.WriteFile(khPath, []byte(line+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	khPath := writeKnownHostsAt(t, dir, unresolvableHostport, storedKey)
 
 	wantFP := ssh.FingerprintSHA256(storedKey)
-	gotFP := storedFingerprint(khPath, "unresolvable.invalid:22", storedKey.Type())
+	gotFP := storedFingerprint(khPath, unresolvableHostport, storedKey.Type())
 	if gotFP != wantFP {
 		t.Errorf("storedFingerprint() = %q, want %q", gotFP, wantFP)
+	}
+}
+
+func TestStoredFingerprint_InvalidFile(t *testing.T) {
+	fp := storedFingerprint(filepath.Join(t.TempDir(), "missing"), unresolvableHostport, "ssh-ed25519")
+	if fp != "" {
+		t.Errorf("expected empty fingerprint for an unreadable known_hosts file, got %q", fp)
+	}
+}
+
+func TestStoredFingerprint_MalformedHostport_ReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := writeKnownHostsAt(t, dir, unresolvableHostport, storedKey)
+
+	// A probe failure (malformed hostport, no colon) must be indistinguishable
+	// from "not stored" here — storedFingerprint is read-only, used by Inspect
+	// to report a fingerprint, so "" is the correct degraded answer. Only the
+	// write path (rewriteKnownHostsEntry, via findStoredKeyLine) must not make
+	// this same conflation, since there it would cause a duplicate-append.
+	fp := storedFingerprint(khPath, "nohostport", storedKey.Type())
+	if fp != "" {
+		t.Errorf("expected empty fingerprint for a malformed hostport, got %q", fp)
 	}
 }
 
@@ -78,14 +97,19 @@ const testHostport = "127.0.0.1:2222"
 // file's fake configs.
 const testHostName = "web1"
 
-func writeKnownHosts(t *testing.T, dir string, key ssh.PublicKey) string {
+func writeKnownHostsAt(t *testing.T, dir, hostport string, key ssh.PublicKey) string {
 	t.Helper()
 	path := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize(testHostport)}, key)
+	line := knownhosts.Line([]string{knownhosts.Normalize(hostport)}, key)
 	if err := os.WriteFile(path, []byte(line+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeKnownHosts(t *testing.T, dir string, key ssh.PublicKey) string {
+	t.Helper()
+	return writeKnownHostsAt(t, dir, testHostport, key)
 }
 
 func fakeHost(khPath string, allow bool) config.Host {

@@ -1,9 +1,7 @@
 package hostkeys
 
 import (
-	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,26 +26,11 @@ func rewriteKnownHostsEntry(path, hostport string, liveKey ssh.PublicKey) error 
 
 // findStoredKeyLine probes path for a stored entry of keyType at hostport and
 // returns its 1-indexed line number. Returns 0 if not found (caller will append).
+// Returns an error if the probe itself fails — see probeStoredKey for why that
+// must never be conflated with "not found".
 func findStoredKeyLine(path, hostport, keyType string) (int, error) {
-	cb, err := knownhosts.New(path)
-	if err != nil {
-		return 0, fmt.Errorf("loading known_hosts %q: %w", path, err)
-	}
-	addr, _ := net.ResolveTCPAddr("tcp", hostport)
-	if addr == nil {
-		addr = &net.TCPAddr{}
-	}
-	probeErr := cb(hostport, addr, probeKey{})
-	var kerr *knownhosts.KeyError
-	if !errors.As(probeErr, &kerr) {
-		return 0, nil
-	}
-	for _, kk := range kerr.Want {
-		if kk.Key.Type() == keyType {
-			return kk.Line, nil
-		}
-	}
-	return 0, nil
+	_, lineNum, err := probeStoredKey(path, hostport, keyType)
+	return lineNum, err
 }
 
 // rewriteLine replaces the 1-indexed lineNum in path with newLine atomically.

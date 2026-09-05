@@ -2,6 +2,7 @@ package hostkeys
 
 import (
 	"encoding/base64"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,20 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+// unresolvableHostport fails net.ResolveTCPAddr with zero network I/O: the
+// port is out of range, and ResolveTCPAddr rejects the port before it ever
+// looks up the host. Do not "simplify" this to a normal host:port — the
+// nil-addr fallback guard in probeStoredKey is only reachable when resolution
+// fails, and a resolvable value makes these tests pass while covering nothing.
+const unresolvableHostport = "testhost:99999"
+
+func TestUnresolvableHostport_Precondition(t *testing.T) {
+	if _, err := net.ResolveTCPAddr("tcp", unresolvableHostport); err == nil {
+		t.Fatalf("%q must not resolve — the nil-addr fallback tests cover nothing if it does",
+			unresolvableHostport)
+	}
+}
 
 // keyB64 returns the base64-encoded wire format of a public key — exactly what
 // appears in a known_hosts file. This is the correct token to search for when
@@ -65,7 +80,7 @@ func TestRewriteLine_Perms(t *testing.T) {
 }
 
 func TestFindStoredKeyLine_InvalidFile(t *testing.T) {
-	_, err := findStoredKeyLine(filepath.Join(t.TempDir(), "does-not-exist"), "host:22", "ssh-ed25519")
+	_, err := findStoredKeyLine(filepath.Join(t.TempDir(), "does-not-exist"), unresolvableHostport, "ssh-ed25519")
 	if err == nil {
 		t.Fatal("expected error for a known_hosts path that cannot be loaded")
 	}
@@ -75,12 +90,12 @@ func TestFindStoredKeyLine_NoMatchingType(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t) // ecdsa-sha2-nistp256
 	khPath := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, storedKey)
+	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, storedKey)
 	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
 
 	// An entry exists for this host, but of a different key type — the caller
 	// should be told to append rather than rewrite (line == 0).
-	lineNum, err := findStoredKeyLine(khPath, "unresolvable.invalid:22", "ssh-ed25519")
+	lineNum, err := findStoredKeyLine(khPath, unresolvableHostport, "ssh-ed25519")
 	if err != nil {
 		t.Fatalf("findStoredKeyLine: %v", err)
 	}
@@ -93,10 +108,10 @@ func TestFindStoredKeyLine_UnresolvableHost_FindsLine(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t)
 	khPath := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, storedKey)
+	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, storedKey)
 	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
 
-	lineNum, err := findStoredKeyLine(khPath, "unresolvable.invalid:22", storedKey.Type())
+	lineNum, err := findStoredKeyLine(khPath, unresolvableHostport, storedKey.Type())
 	if err != nil {
 		t.Fatalf("findStoredKeyLine: %v", err)
 	}
@@ -105,15 +120,32 @@ func TestFindStoredKeyLine_UnresolvableHost_FindsLine(t *testing.T) {
 	}
 }
 
+func TestFindStoredKeyLine_MalformedHostport_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := filepath.Join(dir, "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, storedKey)
+	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
+
+	// "nohostport" has no colon, so knownhosts' internal SplitHostPort fails and
+	// the probe returns a plain error rather than a *knownhosts.KeyError. That
+	// must surface as an error here, not as "0, nil" (= not stored) — see
+	// probeStoredKey's doc comment for why conflating the two is a security bug.
+	_, err := findStoredKeyLine(khPath, "nohostport", storedKey.Type())
+	if err == nil {
+		t.Fatal("expected error for a malformed hostport that fails knownhosts' internal SplitHostPort")
+	}
+}
+
 func TestRewriteKnownHostsEntry_UnresolvableHost_RewritesInPlace(t *testing.T) {
 	dir := t.TempDir()
 	oldKey := newTestKey(t)
 	newKey := newTestKey(t)
 	khPath := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, oldKey)
+	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, oldKey)
 	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
 
-	if err := rewriteKnownHostsEntry(khPath, "unresolvable.invalid:22", newKey); err != nil {
+	if err := rewriteKnownHostsEntry(khPath, unresolvableHostport, newKey); err != nil {
 		t.Fatalf("rewriteKnownHostsEntry: %v", err)
 	}
 
@@ -121,20 +153,36 @@ func TestRewriteKnownHostsEntry_UnresolvableHost_RewritesInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 line (in-place rewrite), got %d lines: %q", len(lines), string(content))
-	}
-	newLine := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, newKey)
-	if lines[0] != newLine {
-		t.Errorf("line content mismatch:\ngot:  %s\nwant: %s", lines[0], newLine)
+	want := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, newKey) + "\n"
+	if string(content) != want {
+		t.Errorf("content = %q, want %q", content, want)
 	}
 }
 
-func TestStoredFingerprint_InvalidFile(t *testing.T) {
-	fp := storedFingerprint(filepath.Join(t.TempDir(), "missing"), "host:22", "ssh-ed25519")
-	if fp != "" {
-		t.Errorf("expected empty fingerprint for an unreadable known_hosts file, got %q", fp)
+func TestRewriteKnownHostsEntry_MalformedHostport_LeavesFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	oldKey := newTestKey(t)
+	newKey := newTestKey(t)
+	khPath := filepath.Join(dir, "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, oldKey)
+	original := line + "\n"
+	if err := os.WriteFile(khPath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A probe failure must error out, not fall back to appending a duplicate
+	// entry — that would leave the superseded key trusted alongside the new
+	// one. Pin the file's contents to prove nothing was written.
+	if err := rewriteKnownHostsEntry(khPath, "nohostport", newKey); err == nil {
+		t.Fatal("expected error for a malformed hostport")
+	}
+
+	content, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != original {
+		t.Errorf("file was modified on probe failure: got %q, want unchanged %q", content, original)
 	}
 }
 

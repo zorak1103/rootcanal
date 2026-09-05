@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 
 	"github.com/zorak1103/rootcanal/internal/config"
 	"github.com/zorak1103/rootcanal/internal/sshconn"
@@ -122,26 +121,48 @@ func (r *prodRefresher) Accept(ctx context.Context, host, expectedFingerprint st
 
 // storedFingerprint returns the SHA256 fingerprint of the stored key of keyType
 // for hostport in path. Returns "" if no entry of that type exists.
-func storedFingerprint(path, hostport, keyType string) string {
+// probeStoredKey returns the stored key of keyType for hostport in path and its
+// 1-indexed line number. Returns (nil, 0, nil) when no entry of that type is
+// stored — the caller should append.
+//
+// A probe that fails for any other reason is an error, never "not stored":
+// reporting "not stored" would make rewriteKnownHostsEntry append a *second*
+// entry for the host, and knownhosts accepts a match against any listed entry —
+// so the superseded key would stay trusted, which is the exact opposite of what
+// ssh_accept_host_key is for.
+func probeStoredKey(path, hostport, keyType string) (ssh.PublicKey, int, error) {
 	cb, err := knownhosts.New(path)
 	if err != nil {
-		return ""
+		return nil, 0, fmt.Errorf("loading known_hosts %q: %w", path, err)
 	}
-	addr, _ := net.ResolveTCPAddr("tcp", hostport)
-	if addr == nil {
-		addr = &net.TCPAddr{}
+	probeErr := cb(hostport, sshconn.ProbeAddr(hostport), probeKey{})
+	if probeErr == nil {
+		// Never expected in practice: probeKey's fake marshaled bytes would have
+		// to exactly match a stored key. Treat it the same as "not stored".
+		return nil, 0, nil
 	}
-	probeErr := cb(hostport, addr, probeKey{})
 	var kerr *knownhosts.KeyError
 	if !errors.As(probeErr, &kerr) {
-		return ""
+		return nil, 0, fmt.Errorf("probing known_hosts %q for %q: %w", path, hostport, probeErr)
 	}
 	for _, kk := range kerr.Want {
 		if kk.Key.Type() == keyType {
-			return ssh.FingerprintSHA256(kk.Key)
+			return kk.Key, kk.Line, nil
 		}
 	}
-	return ""
+	return nil, 0, nil
+}
+
+// storedFingerprint returns the SHA256 fingerprint of the stored key of keyType
+// for hostport in path. Returns "" if no entry of that type exists, or if the
+// probe itself failed — callers needing to distinguish a probe failure from a
+// genuine absence (e.g. before writing) must use probeStoredKey directly.
+func storedFingerprint(path, hostport, keyType string) string {
+	key, _, err := probeStoredKey(path, hostport, keyType)
+	if err != nil || key == nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(key)
 }
 
 // probeKey is a minimal ssh.PublicKey used only to trigger knownhosts.KeyError.
