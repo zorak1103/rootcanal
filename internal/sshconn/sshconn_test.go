@@ -123,6 +123,36 @@ func TestResolveKnownHosts(t *testing.T) {
 	}
 }
 
+func TestKnownHostAlgorithms_UnresolvableHost(t *testing.T) {
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "known_hosts")
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostport := "unresolvable.invalid:22"
+	line := knownhosts.Line([]string{knownhosts.Normalize(hostport)}, signer.PublicKey())
+	if err := os.WriteFile(khPath, []byte(line+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cb, err := knownhosts.New(khPath)
+	if err != nil {
+		t.Fatalf("knownhosts.New: %v", err)
+	}
+
+	algos := knownHostAlgorithms(cb, hostport)
+	want := []string{signer.PublicKey().Type()}
+	if len(algos) != len(want) || algos[0] != want[0] {
+		t.Errorf("knownHostAlgorithms() = %v, want %v", algos, want)
+	}
+}
+
 // ---- buildPasswordAuth ----
 
 func TestBuildPasswordAuth(t *testing.T) {

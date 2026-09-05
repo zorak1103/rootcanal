@@ -75,17 +75,59 @@ func TestFindStoredKeyLine_NoMatchingType(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t) // ecdsa-sha2-nistp256
 	khPath := filepath.Join(dir, "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize("host:22")}, storedKey)
+	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, storedKey)
 	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
 
 	// An entry exists for this host, but of a different key type — the caller
 	// should be told to append rather than rewrite (line == 0).
-	lineNum, err := findStoredKeyLine(khPath, "host:22", "ssh-ed25519")
+	lineNum, err := findStoredKeyLine(khPath, "unresolvable.invalid:22", "ssh-ed25519")
 	if err != nil {
 		t.Fatalf("findStoredKeyLine: %v", err)
 	}
 	if lineNum != 0 {
 		t.Errorf("expected 0 (no matching type), got %d", lineNum)
+	}
+}
+
+func TestFindStoredKeyLine_UnresolvableHost_FindsLine(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := filepath.Join(dir, "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, storedKey)
+	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
+
+	lineNum, err := findStoredKeyLine(khPath, "unresolvable.invalid:22", storedKey.Type())
+	if err != nil {
+		t.Fatalf("findStoredKeyLine: %v", err)
+	}
+	if lineNum != 1 {
+		t.Errorf("expected line 1 for matching unresolvable host, got %d", lineNum)
+	}
+}
+
+func TestRewriteKnownHostsEntry_UnresolvableHost_RewritesInPlace(t *testing.T) {
+	dir := t.TempDir()
+	oldKey := newTestKey(t)
+	newKey := newTestKey(t)
+	khPath := filepath.Join(dir, "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, oldKey)
+	_ = os.WriteFile(khPath, []byte(line+"\n"), 0600)
+
+	if err := rewriteKnownHostsEntry(khPath, "unresolvable.invalid:22", newKey); err != nil {
+		t.Fatalf("rewriteKnownHostsEntry: %v", err)
+	}
+
+	content, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line (in-place rewrite), got %d lines: %q", len(lines), string(content))
+	}
+	newLine := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, newKey)
+	if lines[0] != newLine {
+		t.Errorf("line content mismatch:\ngot:  %s\nwant: %s", lines[0], newLine)
 	}
 }
 

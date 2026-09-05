@@ -39,6 +39,22 @@ func TestProbeKey_TypeAndVerify(t *testing.T) {
 	}
 }
 
+func TestStoredFingerprint_UnresolvableHost(t *testing.T) {
+	dir := t.TempDir()
+	storedKey := newTestKey(t)
+	khPath := filepath.Join(dir, "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize("unresolvable.invalid:22")}, storedKey)
+	if err := os.WriteFile(khPath, []byte(line+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	wantFP := ssh.FingerprintSHA256(storedKey)
+	gotFP := storedFingerprint(khPath, "unresolvable.invalid:22", storedKey.Type())
+	if gotFP != wantFP {
+		t.Errorf("storedFingerprint() = %q, want %q", gotFP, wantFP)
+	}
+}
+
 // --- helpers ---
 
 func newTestKey(t *testing.T) ssh.PublicKey {
