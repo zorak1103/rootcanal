@@ -123,15 +123,16 @@ func TestResolveKnownHosts(t *testing.T) {
 	}
 }
 
-// unresolvableHostport is never resolved by knownHostAlgorithms/probeRemote —
-// that's exactly what this test pins. knownhosts only cares that the address
-// argument passed to the callback (hostport itself) parses via
-// net.SplitHostPort; probeRemote's fake net.Addr is discarded by knownhosts
-// whenever that address is non-empty. Do not "fix" this to a resolvable
-// host:port — that would hide a regression back to resolving hostport.
+// unresolvableHostport has a syntactically valid host:port form but does not
+// resolve. Nothing in knownHostAlgorithms/ProbeRemote calls net.ResolveTCPAddr
+// on it — the callback only requires that hostport itself parses via
+// net.SplitHostPort — so this pins that the probe succeeds without any DNS
+// I/O, not that a resolve failure is specifically tolerated (resolving and not
+// resolving are indistinguishable to the callback either way, since
+// ProbeRemote's return value is discarded once hostport is non-empty).
 const unresolvableHostport = "testhost:99999"
 
-func TestKnownHostAlgorithms_UsesAddressNotRemote(t *testing.T) {
+func TestKnownHostAlgorithms_UnresolvableHostport(t *testing.T) {
 	dir := t.TempDir()
 	khPath := filepath.Join(dir, "known_hosts")
 

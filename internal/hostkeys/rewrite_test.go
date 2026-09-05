@@ -12,11 +12,11 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// unresolvableHostport is an arbitrary hostport literal shared across this
-// file's probe tests. It is never resolved: probeStoredKey's probeRemote
-// helper no longer calls net.ResolveTCPAddr at all, since knownhosts discards
-// that value whenever the callback's address argument (hostport itself) is
-// non-empty — which config.normalizeAddress guarantees it always is.
+// unresolvableHostport has a syntactically valid host:port form but does not
+// resolve. It is shared across this file's probe tests to pin that
+// probeStoredKey never calls net.ResolveTCPAddr — it only requires that
+// hostport parses via net.SplitHostPort — so a probe against a host with no
+// DNS entry still succeeds.
 const unresolvableHostport = "testhost:99999"
 
 // malformedHostport has no colon, so knownhosts' internal net.SplitHostPort
@@ -181,6 +181,35 @@ func TestRewriteKnownHostsEntry_MalformedHostport_LeavesFileUnchanged(t *testing
 	// one. Pin the file's contents to prove nothing was written.
 	if err := rewriteKnownHostsEntry(khPath, malformedHostport, newKey); err == nil {
 		t.Fatal("expected error for a malformed hostport")
+	}
+
+	content, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != original {
+		t.Errorf("file was modified on probe failure: got %q, want unchanged %q", content, original)
+	}
+}
+
+func TestRewriteKnownHostsEntry_EmptyHostport_LeavesFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	oldKey := newTestKey(t)
+	newKey := newTestKey(t)
+	khPath := filepath.Join(dir, "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, oldKey)
+	original := line + "\n"
+	if err := os.WriteFile(khPath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// An empty hostport makes knownhosts fall back to remote.String() (":0"),
+	// which matches nothing and would otherwise read as "not stored" — the
+	// same conflation a malformed hostport risks. probeStoredKey rejects it
+	// explicitly rather than relying solely on config.normalizeAddress to
+	// keep hostport non-empty.
+	if err := rewriteKnownHostsEntry(khPath, "", newKey); err == nil {
+		t.Fatal("expected error for an empty hostport")
 	}
 
 	content, err := os.ReadFile(khPath)

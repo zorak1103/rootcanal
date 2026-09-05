@@ -39,39 +39,61 @@ func TestProbeKey_TypeAndVerify(t *testing.T) {
 	}
 }
 
-func TestStoredFingerprint_UnresolvableHost(t *testing.T) {
+func TestProbeStoredKey_UnresolvableHost(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t)
 	khPath := writeKnownHostsAt(t, dir, unresolvableHostport, storedKey)
 
+	key, _, err := probeStoredKey(khPath, unresolvableHostport, storedKey.Type())
+	if err != nil {
+		t.Fatalf("probeStoredKey: %v", err)
+	}
 	wantFP := ssh.FingerprintSHA256(storedKey)
-	gotFP := storedFingerprint(khPath, unresolvableHostport, storedKey.Type())
-	if gotFP != wantFP {
-		t.Errorf("storedFingerprint() = %q, want %q", gotFP, wantFP)
+	if got := ssh.FingerprintSHA256(key); got != wantFP {
+		t.Errorf("probeStoredKey() key fingerprint = %q, want %q", got, wantFP)
 	}
 }
 
-func TestStoredFingerprint_InvalidFile(t *testing.T) {
-	fp := storedFingerprint(filepath.Join(t.TempDir(), "missing"), unresolvableHostport, "ssh-ed25519")
-	if fp != "" {
-		t.Errorf("expected empty fingerprint for an unreadable known_hosts file, got %q", fp)
+func TestAccept_ProbeFails_MissingFile_ReturnsError(t *testing.T) {
+	liveKey := newTestKey(t)
+	host := fakeHost(filepath.Join(t.TempDir(), "missing"), true)
+	cfg := makeCfg(host)
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	// Accept must surface a probe failure as an error, never fall through to
+	// "no key stored" and append a second entry — see probeStoredKey's doc
+	// comment. Same reasoning as TestInspect_ProbeFails, but exercised on the
+	// write path where a wrong answer would corrupt known_hosts, not just
+	// misreport a fingerprint.
+	if _, err := r.Accept(context.Background(), testHostName, ssh.FingerprintSHA256(liveKey)); err == nil {
+		t.Fatal("expected error when the known_hosts probe fails, not a degraded write")
 	}
 }
 
-func TestStoredFingerprint_MalformedHostport_ReturnsEmpty(t *testing.T) {
+func TestAccept_ProbeFails_MalformedHostport_LeavesFileUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	storedKey := newTestKey(t)
 	khPath := writeKnownHostsAt(t, dir, unresolvableHostport, storedKey)
+	liveKey := newTestKey(t)
 
-	// A probe failure (malformed hostport, no colon) must be indistinguishable
-	// from "not stored" here — storedFingerprint is used only by Accept, where
-	// a "" result still leads to a safe outcome: rewriteKnownHostsEntry redoes
-	// the same probe and errors out for real before any write happens. Inspect
-	// does not use storedFingerprint for exactly this reason — see
-	// TestInspect_ProbeFails.
-	fp := storedFingerprint(khPath, malformedHostport, storedKey.Type())
-	if fp != "" {
-		t.Errorf("expected empty fingerprint for a malformed hostport, got %q", fp)
+	host := fakeHost(khPath, true)
+	host.Address = malformedHostport // no colon: probeStoredKey errors, doesn't return "not stored"
+	cfg := makeCfg(host)
+	r := New(cfg, &fakeScanner{key: liveKey})
+
+	before, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Accept(context.Background(), testHostName, ssh.FingerprintSHA256(liveKey)); err == nil {
+		t.Fatal("expected error when the known_hosts probe fails, not a degraded write")
+	}
+	after, err := os.ReadFile(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("file was modified on probe failure: got %q, want unchanged %q", after, before)
 	}
 }
 

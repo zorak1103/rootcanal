@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 
 	"github.com/zorak1103/rootcanal/internal/config"
 	"github.com/zorak1103/rootcanal/internal/sshconn"
@@ -121,7 +120,17 @@ func (r *prodRefresher) Accept(ctx context.Context, host, expectedFingerprint st
 				"call ssh_accept_host_key without confirm=true to re-inspect",
 			expectedFingerprint, newFP)
 	}
-	currentFP := storedFingerprint(path, h.Address, liveKey.Type())
+	storedKey, _, err := probeStoredKey(path, h.Address, liveKey.Type())
+	if err != nil {
+		// Same reasoning as Inspect: a probe failure must fail the call, never
+		// be read as "no key stored" — that would fall through to the append
+		// path in rewriteKnownHostsEntry and leave a superseded key trusted.
+		return AcceptResult{}, fmt.Errorf("checking stored host key: %w", err)
+	}
+	currentFP := ""
+	if storedKey != nil {
+		currentFP = ssh.FingerprintSHA256(storedKey)
+	}
 	if currentFP == newFP {
 		return AcceptResult{Host: host, NewFP: newFP, KnownHosts: path, Refreshed: false}, nil
 	}
@@ -141,11 +150,19 @@ func (r *prodRefresher) Accept(ctx context.Context, host, expectedFingerprint st
 // so the superseded key would stay trusted, which is the exact opposite of what
 // ssh_accept_host_key is for.
 func probeStoredKey(path, hostport, keyType string) (ssh.PublicKey, int, error) {
+	if hostport == "" {
+		// An empty hostport makes knownhosts fall back to remote.String() ("":0"),
+		// which matches nothing and returns an empty KeyError.Want — i.e. "not
+		// stored". That is the exact conflation this function exists to avoid
+		// (see the doc comment above), so reject it explicitly rather than
+		// relying solely on config.normalizeAddress to keep hostport non-empty.
+		return nil, 0, fmt.Errorf("probing known_hosts %q: empty hostport", path)
+	}
 	cb, err := knownhosts.New(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("loading known_hosts %q: %w", path, err)
 	}
-	probeErr := cb(hostport, probeRemote(), probeKey{})
+	probeErr := cb(hostport, sshconn.ProbeRemote(), probeKey{})
 	if probeErr == nil {
 		// probeKey's fake marshaled bytes matched a stored key — i.e. an entry
 		// definitely exists. Reporting "not stored" here would be the exact
@@ -164,27 +181,6 @@ func probeStoredKey(path, hostport, keyType string) (ssh.PublicKey, int, error) 
 		}
 	}
 	return nil, 0, nil
-}
-
-// probeRemote is the fake remote address passed to a knownhosts.HostKeyCallback
-// during a known_hosts probe. See sshconn.probeRemote for why resolving
-// hostport would be wasted, uncancellable work: knownhosts discards this value
-// whenever the callback's address argument is non-empty, which it always is
-// here (config.normalizeAddress guarantees hostport is never "").
-func probeRemote() net.Addr {
-	return &net.TCPAddr{}
-}
-
-// storedFingerprint returns the SHA256 fingerprint of the stored key of keyType
-// for hostport in path. Returns "" if no entry of that type exists, or if the
-// probe itself failed — callers needing to distinguish a probe failure from a
-// genuine absence (e.g. before writing) must use probeStoredKey directly.
-func storedFingerprint(path, hostport, keyType string) string {
-	key, _, err := probeStoredKey(path, hostport, keyType)
-	if err != nil || key == nil {
-		return ""
-	}
-	return ssh.FingerprintSHA256(key)
 }
 
 // probeKey is a minimal ssh.PublicKey used only to trigger knownhosts.KeyError.
