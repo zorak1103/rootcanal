@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 
 	"github.com/zorak1103/rootcanal/internal/config"
 	"github.com/zorak1103/rootcanal/internal/sshconn"
@@ -22,8 +24,21 @@ type InspectResult struct {
 	Host       string `json:"host"`
 	CurrentFP  string `json:"current_fingerprint"` // SHA256 of stored key matching live key type; "" if none
 	NewFP      string `json:"new_fingerprint"`     // SHA256 of freshly scanned live key
-	Changed    bool   `json:"changed"`
-	KnownHosts string `json:"known_hosts"` // resolved path (shown to operator)
+	Changed    bool   `json:"changed"`             // true only when a same-type entry exists with a different fingerprint
+	KnownHosts string `json:"known_hosts"`         // resolved path (shown to operator)
+	// StaleEntries lists every entry stored for this host that Accept cannot
+	// safely supersede: more than one entry, or an entry of a different key
+	// type than the live key. Non-empty means confirm=true will fail until the
+	// operator removes the stale entries — see selectTarget.
+	StaleEntries []StaleEntry `json:"stale_entries,omitempty"`
+}
+
+// StaleEntry describes one known_hosts entry that ssh_accept_host_key cannot
+// safely rewrite or supersede without operator intervention.
+type StaleEntry struct {
+	Type        string `json:"type"`
+	Line        int    `json:"line"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // AcceptResult is returned by Accept.
@@ -76,7 +91,7 @@ func (r *prodRefresher) Inspect(ctx context.Context, host string) (InspectResult
 		return InspectResult{}, fmt.Errorf("scanning host key: %w", err)
 	}
 	newFP := ssh.FingerprintSHA256(liveKey)
-	storedKey, _, err := probeStoredKey(path, h.Address, liveKey.Type())
+	entries, err := probeStoredEntries(path, h.Address)
 	if err != nil {
 		// Do not report this as CurrentFP=="" (= "no key stored, safe to trust")
 		// — that reading is exactly what an operator or LLM would act on to
@@ -84,16 +99,28 @@ func (r *prodRefresher) Inspect(ctx context.Context, host string) (InspectResult
 		// current state at all, so fail the call instead of guessing.
 		return InspectResult{}, fmt.Errorf("checking stored host key: %w", err)
 	}
+	matched, stale := classifyEntries(entries, liveKey.Type())
 	currentFP := ""
-	if storedKey != nil {
-		currentFP = ssh.FingerprintSHA256(storedKey)
+	changed := false
+	if matched != nil {
+		currentFP = ssh.FingerprintSHA256(matched.Key)
+		changed = currentFP != newFP
+	}
+	var staleEntries []StaleEntry
+	for _, e := range stale {
+		staleEntries = append(staleEntries, StaleEntry{
+			Type:        e.Key.Type(),
+			Line:        e.Line,
+			Fingerprint: ssh.FingerprintSHA256(e.Key),
+		})
 	}
 	return InspectResult{
-		Host:       host,
-		CurrentFP:  currentFP,
-		NewFP:      newFP,
-		Changed:    currentFP != newFP,
-		KnownHosts: path,
+		Host:         host,
+		CurrentFP:    currentFP,
+		NewFP:        newFP,
+		Changed:      changed,
+		KnownHosts:   path,
+		StaleEntries: staleEntries,
 	}, nil
 }
 
@@ -120,47 +147,75 @@ func (r *prodRefresher) Accept(ctx context.Context, host, expectedFingerprint st
 				"call ssh_accept_host_key without confirm=true to re-inspect",
 			expectedFingerprint, newFP)
 	}
-	storedKey, _, err := probeStoredKey(path, h.Address, liveKey.Type())
+	entries, err := probeStoredEntries(path, h.Address)
 	if err != nil {
 		// Same reasoning as Inspect: a probe failure must fail the call, never
 		// be read as "no key stored" — that would fall through to the append
-		// path in rewriteKnownHostsEntry and leave a superseded key trusted.
+		// path and leave a superseded key trusted.
 		return AcceptResult{}, fmt.Errorf("checking stored host key: %w", err)
 	}
-	currentFP := ""
-	if storedKey != nil {
-		currentFP = ssh.FingerprintSHA256(storedKey)
-	}
-	if currentFP == newFP {
+	matched, _ := classifyEntries(entries, liveKey.Type())
+	if matched != nil && ssh.FingerprintSHA256(matched.Key) == newFP {
 		return AcceptResult{Host: host, NewFP: newFP, KnownHosts: path, Refreshed: false}, nil
 	}
-	if err := rewriteKnownHostsEntry(path, h.Address, liveKey); err != nil {
+	// selectTarget re-derives the same partition classifyEntries just computed
+	// (no extra file I/O — entries was already read above) and turns an
+	// ambiguous state (multiple entries, or one of a different type) into an
+	// error instead of a guess. See its doc comment for why guessing here is
+	// the exact bug this package exists to close.
+	lineNum, err := selectTarget(entries, liveKey, path, h.Address)
+	if err != nil {
+		return AcceptResult{}, err
+	}
+	var expectKey ssh.PublicKey
+	if matched != nil {
+		expectKey = matched.Key
+	}
+	if err := writeKnownHostsEntry(path, h.Address, liveKey, lineNum, expectKey); err != nil {
 		return AcceptResult{}, fmt.Errorf("rewriting known_hosts: %w", err)
 	}
 	return AcceptResult{Host: host, NewFP: newFP, KnownHosts: path, Refreshed: true}, nil
 }
 
-// probeStoredKey returns the stored key of keyType for hostport in path and its
-// 1-indexed line number. Returns (nil, 0, nil) when no entry of that type is
-// stored — the caller should append.
+// storedEntry is one known_hosts line matching a probed hostport.
+type storedEntry struct {
+	Key  ssh.PublicKey
+	Line int // 1-indexed
+}
+
+// probeStoredEntries returns every known_hosts entry matching hostport, in
+// file order. Returns (nil, nil) when nothing matches — the caller should
+// append.
 //
 // A probe that fails for any other reason is an error, never "not stored":
-// reporting "not stored" would make rewriteKnownHostsEntry append a *second*
-// entry for the host, and knownhosts accepts a match against any listed entry —
-// so the superseded key would stay trusted, which is the exact opposite of what
+// reporting "not stored" would make the caller append a *second* entry for
+// the host, and knownhosts accepts a match against any listed entry — so a
+// superseded key would stay trusted, which is the exact opposite of what
 // ssh_accept_host_key is for.
-func probeStoredKey(path, hostport, keyType string) (ssh.PublicKey, int, error) {
+func probeStoredEntries(path, hostport string) ([]storedEntry, error) {
 	if hostport == "" {
-		// An empty hostport makes knownhosts fall back to remote.String() ("":0"),
+		// An empty hostport makes knownhosts fall back to remote.String() (":0"),
 		// which matches nothing and returns an empty KeyError.Want — i.e. "not
 		// stored". That is the exact conflation this function exists to avoid
 		// (see the doc comment above), so reject it explicitly rather than
 		// relying solely on config.normalizeAddress to keep hostport non-empty.
-		return nil, 0, fmt.Errorf("probing known_hosts %q: empty hostport", path)
+		return nil, fmt.Errorf("probing known_hosts %q: empty hostport", path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// rootcanal will not create the operator's trust store — reporting
+			// this the same way as a corrupt/unreadable file would leave the
+			// operator guessing why ssh_accept_host_key refuses to bootstrap a
+			// brand new known_hosts file.
+			return nil, fmt.Errorf(
+				"known_hosts %q does not exist; create it first (e.g. \"touch %s && chmod 600 %s\") — "+
+					"rootcanal will not create your trust store", path, path, path)
+		}
+		return nil, fmt.Errorf("checking known_hosts %q: %w", path, err)
 	}
 	cb, err := knownhosts.New(path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("loading known_hosts %q: %w", path, err)
+		return nil, fmt.Errorf("loading known_hosts %q: %w", path, err)
 	}
 	probeErr := cb(hostport, sshconn.ProbeRemote(), probeKey{})
 	if probeErr == nil {
@@ -169,18 +224,60 @@ func probeStoredKey(path, hostport, keyType string) (ssh.PublicKey, int, error) 
 		// duplicate-append bug this function exists to prevent, so this is an
 		// error, not a nil result, even though it should never happen in
 		// practice (probeKey.Marshal() cannot parse as a real public key).
-		return nil, 0, fmt.Errorf("probing known_hosts %q for %q: probe key unexpectedly matched a stored entry", path, hostport)
+		return nil, fmt.Errorf("probing known_hosts %q for %q: probe key unexpectedly matched a stored entry", path, hostport)
 	}
 	var kerr *knownhosts.KeyError
 	if !errors.As(probeErr, &kerr) {
-		return nil, 0, fmt.Errorf("probing known_hosts %q for %q: %w", path, hostport, probeErr)
+		return nil, fmt.Errorf("probing known_hosts %q for %q: %w", path, hostport, probeErr)
 	}
+	entries := make([]storedEntry, 0, len(kerr.Want))
 	for _, kk := range kerr.Want {
-		if kk.Key.Type() == keyType {
-			return kk.Key, kk.Line, nil
+		if kk.Filename != path {
+			continue
 		}
+		entries = append(entries, storedEntry{Key: kk.Key, Line: kk.Line})
 	}
-	return nil, 0, nil
+	return entries, nil
+}
+
+// classifyEntries partitions entries into the single entry matching
+// liveKeyType (safe to supersede) and every other stale entry. matched is nil
+// whenever entries doesn't contain exactly one liveKeyType match — either
+// none exist, more than one exists, or the sole entry differs in type —
+// because none of those states says unambiguously which key to replace.
+func classifyEntries(entries []storedEntry, liveKeyType string) (matched *storedEntry, stale []storedEntry) {
+	if len(entries) == 1 && entries[0].Key.Type() == liveKeyType {
+		return &entries[0], nil
+	}
+	return nil, entries
+}
+
+// selectTarget decides what Accept should do with entries found for hostport,
+// given the freshly scanned liveKey. Returns the 1-indexed line to rewrite, or
+// 0 to append when nothing is stored at all. Errors when more than one entry
+// exists, or when the sole entry is of a different key type than liveKey —
+// either case means "which key is being superseded" is ambiguous, and
+// appending anyway would leave an unrelated key trusted indefinitely.
+func selectTarget(entries []storedEntry, liveKey ssh.PublicKey, path, hostport string) (int, error) {
+	matched, stale := classifyEntries(entries, liveKey.Type())
+	if matched != nil {
+		return matched.Line, nil
+	}
+	if len(stale) == 0 {
+		return 0, nil
+	}
+	if len(stale) > 1 {
+		return 0, fmt.Errorf(
+			"known_hosts %q has %d stored entries for %q; refusing to guess which one to supersede — "+
+				"remove the stale entries (\"ssh-keygen -R %s -f %s\") and retry",
+			path, len(stale), hostport, hostport, path)
+	}
+	e := stale[0]
+	return 0, fmt.Errorf(
+		"known_hosts %q line %d already trusts a %s key for %q but the live key is %s; "+
+			"rootcanal will not append a second entry that leaves the old key trusted — "+
+			"remove the stale entry (\"ssh-keygen -R %s -f %s\") and retry",
+		path, e.Line, e.Key.Type(), hostport, liveKey.Type(), hostport, path)
 }
 
 // probeKey is a minimal ssh.PublicKey used only to trigger knownhosts.KeyError.

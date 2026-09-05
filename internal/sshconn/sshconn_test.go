@@ -123,14 +123,14 @@ func TestResolveKnownHosts(t *testing.T) {
 	}
 }
 
-// unresolvableHostport has a syntactically valid host:port form but does not
+// probeHostport has a syntactically valid host:port form but does not
 // resolve. Nothing in knownHostAlgorithms/ProbeRemote calls net.ResolveTCPAddr
 // on it — the callback only requires that hostport itself parses via
 // net.SplitHostPort — so this pins that the probe succeeds without any DNS
 // I/O, not that a resolve failure is specifically tolerated (resolving and not
 // resolving are indistinguishable to the callback either way, since
 // ProbeRemote's return value is discarded once hostport is non-empty).
-const unresolvableHostport = "testhost:99999"
+const probeHostport = "testhost:99999"
 
 func TestKnownHostAlgorithms_UnresolvableHostport(t *testing.T) {
 	dir := t.TempDir()
@@ -144,7 +144,7 @@ func TestKnownHostAlgorithms_UnresolvableHostport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	line := knownhosts.Line([]string{knownhosts.Normalize(unresolvableHostport)}, signer.PublicKey())
+	line := knownhosts.Line([]string{knownhosts.Normalize(probeHostport)}, signer.PublicKey())
 	if err := os.WriteFile(khPath, []byte(line+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestKnownHostAlgorithms_UnresolvableHostport(t *testing.T) {
 		t.Fatalf("knownhosts.New: %v", err)
 	}
 
-	algos := knownHostAlgorithms(cb, unresolvableHostport)
+	algos := knownHostAlgorithms(cb, probeHostport)
 	want := []string{signer.PublicKey().Type()}
 	if len(algos) != len(want) || algos[0] != want[0] {
 		t.Errorf("knownHostAlgorithms() = %v, want %v", algos, want)
