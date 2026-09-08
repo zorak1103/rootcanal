@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func newTestClient(t *testing.T, mgr session.Manager, ops sftpops.Ops, cfg *conf
 
 func newTestClientFull(t *testing.T, mgr session.Manager, ops sftpops.Ops, cfg *config.Config, reg *jobs.Registry, hk hostkeys.Refresher) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, ops, cfg, reg, hk, nil)
+	srv := mcpserver.New(mgr, ops, cfg, reg, hk)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -139,6 +140,41 @@ func TestToolsList(t *testing.T) {
 	}
 	if got := len(result.Tools); got != 11 {
 		t.Errorf("expected 11 tools, got %d", got)
+	}
+}
+
+func TestServer_DiscoverNegotiatesModernProtocol(t *testing.T) {
+	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
+	srv := mcpserver.New(mgr, nil, nil, nil, nil)
+	var discoverAccepted atomic.Bool
+	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			result, err := next(ctx, method, req)
+			if method == "server/discover" {
+				if _, ok := result.(*mcp.DiscoverResult); ok && err == nil {
+					discoverAccepted.Store(true)
+				}
+			}
+			return result, err
+		}
+	})
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	ctx := t.Context()
+	go func() { _ = srv.Run(ctx, t1) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-discover"}, nil)
+	sess, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	if !discoverAccepted.Load() {
+		t.Fatal("server/discover did not return a successful DiscoverResult")
+	}
+	if got, want := sess.InitializeResult().ProtocolVersion, "2026-07-28"; got != want {
+		t.Fatalf("protocol version = %q, want %q", got, want)
 	}
 }
 
@@ -619,34 +655,6 @@ func TestTool_SFTPList_Success(t *testing.T) {
 	}
 }
 
-func TestOnInitialized_IsCalled(t *testing.T) {
-	called := make(chan struct{}, 1)
-	mgr := &fakeManager{listFn: func() []session.SessionInfo { return nil }}
-
-	srv := mcpserver.New(mgr, nil, nil, nil, nil, func(_ *mcp.ServerSession) {
-		called <- struct{}{}
-	})
-	t1, t2 := mcp.NewInMemoryTransports()
-
-	ctx := t.Context()
-
-	go func() { _ = srv.Run(ctx, t1) }()
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-init"}, nil)
-	sess, err := client.Connect(ctx, t2, nil)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer sess.Close()
-
-	select {
-	case <-called:
-		// onInitialized was invoked as expected
-	case <-time.After(2 * time.Second):
-		t.Error("onInitialized callback was not called within 2s")
-	}
-}
-
 func TestListHosts(t *testing.T) {
 	cfg := &config.Config{
 		Hosts: map[string]config.Host{
@@ -838,7 +846,7 @@ func TestTool_RunOnce_DetachReturnsJobID(t *testing.T) {
 	reg := jobs.NewRegistry(10, time.Minute)
 	t.Cleanup(reg.Close)
 
-	srv := mcpserver.New(mgr, nil, nil, reg, nil, nil)
+	srv := mcpserver.New(mgr, nil, nil, reg, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -893,7 +901,7 @@ func containsStr(b []byte, s string) bool {
 // newTestClientWithReg is like newTestClient but also wires a jobs.Registry.
 func newTestClientWithReg(t *testing.T, mgr session.Manager, reg *jobs.Registry) *mcp.ClientSession {
 	t.Helper()
-	srv := mcpserver.New(mgr, nil, nil, reg, nil, nil)
+	srv := mcpserver.New(mgr, nil, nil, reg, nil)
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	ctx, cancel := context.WithCancel(context.Background())

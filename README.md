@@ -282,7 +282,7 @@ The `e2e/` directory contains end-to-end tests that run the real `rootcanal` bin
 task e2e   # build binary, start container, run ~40 tests, teardown
 ```
 
-The tests exercise the full stack: real SSH PTY sessions, SFTP file operations, auth strategies (key, passphrase, password), host-key strict pinning, session/SFTP limits, MCP logging, and graceful shutdown. Because the container is ephemeral and easily restored, tests may modify files inside it freely.
+The tests exercise the full stack: real SSH PTY sessions, SFTP file operations, auth strategies (key, passphrase, password), host-key strict pinning, session/SFTP limits, stderr logging, and graceful shutdown. Because the container is ephemeral and easily restored, tests may modify files inside it freely.
 
 ## Security
 

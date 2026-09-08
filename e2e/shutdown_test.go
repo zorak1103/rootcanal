@@ -16,12 +16,7 @@ import (
 // TestShutdown_StdinCloseTriggersGracefulShutdown verifies that closing the
 // MCP session (stdin EOF) causes rootcanal to exit within the 10 s shutdown
 // budget rather than hanging.
-//
-// Note: the "shutting down" slog line is NOT checked in stderr because
-// main.go calls log.Info("shutting down") after srv.Run returns — at that
-// point the handler has already been swapped to mcp.NewLoggingHandler, so the
-// message is routed through MCP (which is already closed) and silently dropped.
-// The observable fact of graceful shutdown is the process exiting on time.
+
 func TestShutdown_StdinCloseTriggersGracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -55,7 +50,7 @@ func TestShutdown_StdinCloseTriggersGracefulShutdown(t *testing.T) {
 		t.Fatalf("OpenSession returned error: %s", textOf(res))
 	}
 
-	// Close the session → stdin EOF on rootcanal → srv.Run returns → shutdown.
+	// Close the session: stdin EOF on rootcanal, then srv.Run returns and shutdown begins.
 	_ = sess.Close()
 
 	// The primary assertion: the process must exit within the 10 s shutdown
@@ -65,11 +60,15 @@ func TestShutdown_StdinCloseTriggersGracefulShutdown(t *testing.T) {
 
 	select {
 	case <-done:
-		// Process exited within the deadline — graceful shutdown confirmed.
+		// Process exited within the deadline - graceful shutdown confirmed.
 	case <-time.After(12 * time.Second):
-		t.Error("rootcanal did not exit within 12s after stdin close — likely hung in Shutdown()")
+		t.Error("rootcanal did not exit within 12s after stdin close - likely hung in Shutdown()")
 		_ = cmd.Process.Kill()
 		<-done
+	}
+
+	if stderr := stderrBuf.String(); !strings.Contains(stderr, "shutting down") {
+		t.Errorf("expected shutdown log in stderr, got: %q", stderr)
 	}
 }
 
