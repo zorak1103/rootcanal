@@ -61,3 +61,28 @@ func (s *session) isExpired(idleTimeout, maxAge time.Duration) bool {
 	now := time.Now()
 	return now.Sub(s.lastUsedAt) >= idleTimeout || now.Sub(s.openedAt) >= maxAge
 }
+
+func (s *session) completeInflight(exitCode *int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.inflight = nil
+	if exitCode != nil {
+		ec := *exitCode
+		s.lastExitCode = &ec
+	}
+	s.lastUsedAt = time.Now()
+	return s.closedReason
+}
+
+func (s *session) closeReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closedReason
+}
+
+func (s *session) touch() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsedAt = time.Now()
+}

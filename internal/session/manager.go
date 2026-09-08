@@ -362,6 +362,55 @@ func (m *manager) bootSession(ctx context.Context, s *session, maxWait time.Dura
 	}
 }
 
+type sendAction uint8
+
+const (
+	actClosed sendAction = iota
+	actPeek
+	actNoInflight
+	actContinue
+	actBusy
+	actRaw
+	actNormal
+)
+
+type sendPlan struct {
+	action       sendAction
+	nonce        string
+	closedReason string
+}
+
+func (s *session) beginSend(in SendInput) sendPlan {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return sendPlan{action: actClosed, closedReason: s.closedReason}
+	}
+	if in.WaitIdleMs > 0 {
+		s.lastUsedAt = time.Now()
+		return sendPlan{action: actPeek}
+	}
+	if in.Input == "" {
+		if s.inflight == nil {
+			return sendPlan{action: actNoInflight}
+		}
+		return sendPlan{action: actContinue, nonce: s.inflight.nonce}
+	}
+	if s.inflight != nil {
+		return sendPlan{action: actBusy}
+	}
+
+	s.lastUsedAt = time.Now()
+	if in.Raw {
+		return sendPlan{action: actRaw}
+	}
+
+	nonce := newMarkerNonce()
+	s.inflight = &inflight{nonce: nonce, input: in.Input}
+	return sendPlan{action: actNormal, nonce: nonce}
+}
+
 func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult, error) {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
@@ -379,43 +428,25 @@ func (m *manager) Send(ctx context.Context, id string, in SendInput) (SendResult
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	s.mu.Lock()
-	if s.closed {
-		cr := s.closedReason
-		s.mu.Unlock()
-		return appendLostWarning(SendResult{ClosedReason: cr, Warnings: warnings}), nil
-	}
-
-	// Peek mode: wait for idle, no marker injection. sendPeek unlocks s.mu.
-	if in.WaitIdleMs > 0 {
+	plan := s.beginSend(in)
+	switch plan.action {
+	case actClosed:
+		return appendLostWarning(SendResult{ClosedReason: plan.closedReason, Warnings: warnings}), nil
+	case actPeek:
 		return m.sendPeek(ctx, s, in, warnings), nil
-	}
-
-	// Continuation mode: empty input waits for in-flight marker.
-	if in.Input == "" {
-		if s.inflight == nil {
-			s.mu.Unlock()
-			return SendResult{Warnings: warnings}, nil
-		}
-		nonce := s.inflight.nonce
-		s.mu.Unlock()
-		res, err := m.waitForMarker(ctx, s, nonce, timeout, in.Raw, warnings)
+	case actNoInflight:
+		return SendResult{Warnings: warnings}, nil
+	case actContinue:
+		res, err := m.waitForMarker(ctx, s, plan.nonce, timeout, in.Raw, warnings)
 		return appendLostWarning(res), err
-	}
-
-	// New command: reject if another is in flight.
-	if s.inflight != nil {
-		s.mu.Unlock()
+	case actBusy:
 		return SendResult{}, fmt.Errorf("command still in flight; send empty input to continue waiting")
-	}
-
-	// Raw mode: write as-is, no marker. sendRaw unlocks s.mu.
-	if in.Raw {
+	case actRaw:
 		return m.sendRaw(ctx, s, id, in, warnings, timeout)
+	case actNormal:
+		return m.sendNormal(ctx, s, id, in, plan.nonce, warnings, timeout)
 	}
-
-	// Normal mode: inject exit marker. sendNormal unlocks s.mu.
-	return m.sendNormal(ctx, s, id, in, warnings, timeout)
+	return SendResult{}, fmt.Errorf("unknown send action %d", plan.action)
 }
 
 // resolveSendTimeout computes the effective per-Send timeout from the
@@ -437,16 +468,12 @@ func (m *manager) resolveSendTimeout(reqMs int) (timeout time.Duration, warnings
 
 // sendPeek implements Send's peek mode (wait_idle_ms > 0): wait for the
 // output stream to go idle and return whatever accumulated, without marker
-// injection. Must be called with s.mu held; unlocks it before returning.
+// injection.
 func (m *manager) sendPeek(ctx context.Context, s *session, in SendInput, warnings []string) SendResult {
-	s.lastUsedAt = time.Now()
-	s.mu.Unlock()
 	idleDur := time.Duration(in.WaitIdleMs) * time.Millisecond
 	s.out.WaitForData(ctx, idleDur, idleDur)
 	out, trunc := s.out.Drain()
-	s.mu.Lock()
-	cr := s.closedReason
-	s.mu.Unlock()
+	cr := s.closeReason()
 	return appendLostWarning(SendResult{
 		Output:       string(cleanOutput(out)),
 		Truncated:    trunc,
@@ -457,10 +484,8 @@ func (m *manager) sendPeek(ctx context.Context, s *session, in SendInput, warnin
 
 // sendRaw implements Send's raw mode (in.Raw=true): writes input verbatim
 // with no marker injection, then returns whatever the shell produced after a
-// quiescence window. Must be called with s.mu held; unlocks it before returning.
+// quiescence window.
 func (m *manager) sendRaw(ctx context.Context, s *session, id string, in SendInput, warnings []string, timeout time.Duration) (SendResult, error) {
-	s.lastUsedAt = time.Now()
-	s.mu.Unlock()
 	ch := make(chan error, 1)
 	// If ctx.Done() fires first below, this goroutine is left running; it is
 	// bounded by s.stdin.Close() in Close()/Shutdown(), which unblocks any
@@ -476,21 +501,13 @@ func (m *manager) sendRaw(ctx context.Context, s *session, id string, in SendInp
 	}
 	s.out.WaitForData(ctx, quiesce, timeout)
 	out, trunc := s.out.Drain()
-	s.mu.Lock()
-	cr := s.closedReason
-	s.mu.Unlock()
+	cr := s.closeReason()
 	return appendLostWarning(SendResult{Output: string(out), Truncated: trunc, ClosedReason: cr, Warnings: warnings}), nil
 }
 
 // sendNormal implements Send's default mode: injects an exit-code marker
-// after the command and waits for it via waitForMarker. Must be called with
-// s.mu held and s.inflight == nil already verified; unlocks s.mu before returning.
-func (m *manager) sendNormal(ctx context.Context, s *session, id string, in SendInput, warnings []string, timeout time.Duration) (SendResult, error) {
-	nonce := newMarkerNonce()
-	s.inflight = &inflight{nonce: nonce, input: in.Input}
-	s.lastUsedAt = time.Now()
-	s.mu.Unlock()
-
+// after the command and waits for it via waitForMarker.
+func (m *manager) sendNormal(ctx context.Context, s *session, id string, in SendInput, nonce string, warnings []string, timeout time.Duration) (SendResult, error) {
 	// Strip trailing newlines before appending the marker printf so that the
 	// semicolon never lands at the start of a new shell line (bash syntax error).
 	trimmed := strings.TrimRight(in.Input, "\r\n")
@@ -509,15 +526,11 @@ func (m *manager) sendNormal(ctx context.Context, s *session, id string, in Send
 	select {
 	case err := <-ch:
 		if err != nil {
-			s.mu.Lock()
-			s.inflight = nil
-			s.mu.Unlock()
+			s.completeInflight(nil)
 			return SendResult{}, fmt.Errorf("writing to session %q stdin: %w", id, err)
 		}
 	case <-ctx.Done():
-		s.mu.Lock()
-		s.inflight = nil
-		s.mu.Unlock()
+		s.completeInflight(nil)
 		return SendResult{}, ctx.Err()
 	}
 
@@ -562,22 +575,18 @@ func (m *manager) waitForMarker(
 		}
 
 		if ctx.Err() != nil {
-			s.mu.Lock()
-			s.inflight = nil
-			s.mu.Unlock()
+			s.completeInflight(nil)
 			return SendResult{}, ctx.Err()
 		}
 	}
 
 	// Timeout without marker: keep inflight so continuation works.
-	// DO NOT clear s.inflight here — the caller uses empty-input Send to continue.
+	// DO NOT clear s.inflight here — the caller uses empty-input Send to continue waiting.
 	output := accumulated
 	if !raw {
 		output = cleanOutput(output)
 	}
-	s.mu.Lock()
-	s.lastUsedAt = time.Now()
-	s.mu.Unlock()
+	s.touch()
 
 	return SendResult{
 		Output:       string(output),
@@ -614,16 +623,7 @@ func markerFoundResult(s *session, before, rest []byte, raw, trunc bool, warning
 		exitCode = &ec
 	}
 
-	s.mu.Lock()
-	s.inflight = nil
-	if exitCode != nil {
-		ec := *exitCode
-		s.lastExitCode = &ec
-	}
-	s.lastUsedAt = time.Now()
-	cr := s.closedReason
-	s.mu.Unlock()
-
+	cr := s.completeInflight(exitCode)
 	return SendResult{
 		Output:       string(output),
 		ExitCode:     exitCode,
@@ -643,11 +643,7 @@ func sessionClosedResult(s *session, accumulated []byte, raw, trunc bool, warnin
 		if !raw {
 			output = cleanOutput(output)
 		}
-		s.mu.Lock()
-		s.inflight = nil
-		cr := s.closedReason
-		s.lastUsedAt = time.Now()
-		s.mu.Unlock()
+		cr := s.completeInflight(nil)
 		return SendResult{
 			Output:       string(output),
 			Truncated:    trunc,

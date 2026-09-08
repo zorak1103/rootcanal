@@ -1205,6 +1205,24 @@ func TestMarkerFoundResult_ValidCode_SetsExitCode(t *testing.T) {
 	}
 }
 
+func TestSession_CompleteInflight_ClearsState(t *testing.T) {
+	s := &session{
+		inflight:     &inflight{nonce: "FAKEFAKE"},
+		closedReason: "lost",
+	}
+	exitCode := 7
+
+	if got := s.completeInflight(&exitCode); got != "lost" {
+		t.Fatalf("completeInflight() close reason = %q, want lost", got)
+	}
+	if s.inflight != nil {
+		t.Fatal("completeInflight() left inflight set")
+	}
+	if s.lastExitCode == nil || *s.lastExitCode != exitCode {
+		t.Fatalf("lastExitCode = %v, want %d", s.lastExitCode, exitCode)
+	}
+}
+
 func TestMarkerFoundResult_UnparsableCode_ExitCodeNilWithWarning(t *testing.T) {
 	// A corrupted or unexpected marker (e.g. the remote echoed something
 	// between the nonce and the numeric code) must not be silently reported
