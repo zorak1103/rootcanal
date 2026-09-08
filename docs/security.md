@@ -79,9 +79,7 @@ SFTP binary files are base64-encoded and returned with `binary: true` so they ca
 
 rootcanal uses the stdio MCP transport. The MCP client reads **stdout** and writes to **stdin**. Writing anything to stdout from the server side would corrupt the JSON-RPC stream.
 
-rootcanal enforces this at two levels:
-- All logging before the MCP session is established goes to **stderr**.
-- Once the session handshake completes, logging is routed through `mcp.NewLoggingHandler` which sends `notifications/message` events to the client.
+rootcanal writes all server logging to **stderr**, keeping the stdout JSON-RPC stream clean. This is also the recommended logging channel for stdio MCP servers under SEP-2577.
 
 No `fmt.Println` or `os.Stdout` write exists outside `cmd/rootcanal/main.go`, where they are gated on flags (`-version`, `-validate-config`, `-probe`) that exit before the MCP transport is started.
 

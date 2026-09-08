@@ -73,6 +73,4 @@ A working rootcanal installation will show `ssh_session_open`, `ssh_session_send
 
 ## Logs
 
-rootcanal logs at `INFO` level to the MCP client once the session is established. In Claude Desktop, logs appear in the developer console (`Cmd/Ctrl+Shift+J` → Console tab). Look for messages with the logger name `rootcanal`.
-
-Before the session handshake completes, startup logs go to stderr and are visible in the Claude Desktop log file or terminal if you launched rootcanal manually.
+rootcanal writes its `INFO`-level logs to stderr for the entire process lifetime. Claude Desktop captures stderr in the per-server log file; look for `mcp-server-rootcanal.log` (the exact location depends on the platform). If you launch rootcanal manually, the same logs appear in the terminal.

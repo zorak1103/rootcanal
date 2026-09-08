@@ -16,7 +16,6 @@ import (
 	"github.com/zorak1103/rootcanal/internal/hostkeys"
 	"github.com/zorak1103/rootcanal/internal/hostpool"
 	"github.com/zorak1103/rootcanal/internal/jobs"
-	"github.com/zorak1103/rootcanal/internal/logging"
 	"github.com/zorak1103/rootcanal/internal/mcpserver"
 	"github.com/zorak1103/rootcanal/internal/session"
 	"github.com/zorak1103/rootcanal/internal/sftpops"
@@ -51,14 +50,10 @@ func main() {
 		os.Exit(runProbe(*probeFlag, cfg))
 	}
 
-	// MCP server mode.
-	//
-	// Before the MCP session is established, log to stderr (safe — the stdio
-	// transport only reads stdout). Once the session handshake completes, swap
-	// to mcp.NewLoggingHandler so subsequent logs reach the client via the
-	// notifications/message channel.
-	swap := logging.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	log := slog.New(swap)
+	// MCP server mode. Log to stderr for the process lifetime; the stdio
+	// transport only uses stdout, and stderr is the recommended logging channel
+	// for stdio servers under SEP-2577.
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	pool := hostpool.New(cfg, sshconn.ProdDialer{})
 	defer pool.Close()
@@ -68,15 +63,7 @@ func main() {
 	defer jobReg.Close()
 	hk := hostkeys.New(cfg, sshconn.ProdScanner{})
 
-	srv := mcpserver.New(mgr, ops, cfg, jobReg, hk, func(ss *mcp.ServerSession) {
-		//nolint:staticcheck // SEP-2577: logging remains functional during the 12-month deprecation window; migrate before it's removed.
-		mcpH := mcp.NewLoggingHandler(ss, &mcp.LoggingHandlerOptions{
-			LoggerName:  "rootcanal",
-			MinInterval: 100 * time.Millisecond,
-		})
-		swap.Swap(mcpH)
-		log.Info("MCP logging active", "version", version.Version)
-	})
+	srv := mcpserver.New(mgr, ops, cfg, jobReg, hk)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

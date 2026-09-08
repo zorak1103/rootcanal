@@ -12,17 +12,34 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Harness wraps a rootcanal subprocess and a connected MCP client session.
 // Create one per test with newHarness; it is torn down automatically via t.Cleanup.
+
+type synchronizedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 type Harness struct {
 	t      *testing.T
 	sess   *mcp.ClientSession
-	stderr *bytes.Buffer
+	stderr *synchronizedBuffer
 
 	mu   sync.Mutex
 	logs []string // notifications/message log lines received from the server
@@ -119,7 +136,7 @@ type ListResult struct {
 func newHarness(t *testing.T, cfgPath string, extraEnv ...string) *Harness {
 	t.Helper()
 
-	h := &Harness{t: t, stderr: &bytes.Buffer{}}
+	h := &Harness{t: t, stderr: &synchronizedBuffer{}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -142,16 +159,8 @@ func newHarness(t *testing.T, cfgPath string, extraEnv ...string) *Harness {
 		t.Fatalf("harness: connect MCP: %v", err)
 	}
 	h.sess = sess
-
 	t.Cleanup(func() {
 		_ = sess.Close()
-		// Give the process up to 3 s to exit; if not, the ctx cancel kills it.
-		done := make(chan struct{})
-		go func() { _ = cmd.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-		}
 	})
 
 	return h
