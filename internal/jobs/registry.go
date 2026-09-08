@@ -227,7 +227,8 @@ func (r *Registry) AppendStderr(id string, data []byte) {
 	j.mu.Unlock()
 }
 
-// Reap evicts finished jobs older than the TTL.
+// Reap evicts finished jobs whose age exceeds the TTL. The comparison is
+// strict, so a job whose age is exactly the TTL survives the pass.
 // Called automatically by the reaper goroutine; also exported for deterministic tests.
 func (r *Registry) Reap() {
 	r.mu.Lock()
