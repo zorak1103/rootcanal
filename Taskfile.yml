@@ -53,7 +53,7 @@ tasks:
     desc: Install mutest locally (tracked by Renovate)
     cmds:
       # renovate: datasource=go depName=github.com/fchimpan/mutest
-      - go install github.com/fchimpan/mutest@v0.6.1
+      - go install github.com/fchimpan/mutest@v0.6.2
 
   mutate:
     desc: Run mutation testing over internal/... (no threshold, for local exploration)

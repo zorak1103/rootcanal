@@ -120,7 +120,7 @@ jobs:
 
       - name: Install mutest
         # renovate: datasource=go depName=github.com/fchimpan/mutest
-        run: go install github.com/fchimpan/mutest@v0.6.1
+        run: go install github.com/fchimpan/mutest@v0.6.2
 
       - name: Run mutation testing on changed lines
         run: task mutate:ci
