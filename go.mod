@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/jimschubert/stripansi v0.0.1
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pkg/sftp v1.13.11
 	github.com/testcontainers/testcontainers-go v0.44.0
 	golang.org/x/crypto v0.57.0
