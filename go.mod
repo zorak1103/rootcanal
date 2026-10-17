@@ -70,8 +70,8 @@ require (
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.50.0 // indirect
-	honnef.co/go/tools v0.8.1 // indirect
+	golang.org/x/tools v0.51.0 // indirect
+	honnef.co/go/tools v0.8.2 // indirect
 )
 
 tool honnef.co/go/tools/cmd/staticcheck
